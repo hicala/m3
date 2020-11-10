@@ -1,5 +1,4 @@
-listenAddress:
-  value: "0.0.0.0:7201"
+listenAddress: 0.0.0.0:7201
 
 logging:
   level: info
@@ -38,8 +37,3 @@ clusters:
             - zone: embedded
               endpoints:
                 - cluster_a_dbnode01:2379
-      writeConsistencyLevel: majority
-      readConsistencyLevel: unstrict_majority
-
-tagOptions:
-  idScheme: quoted
