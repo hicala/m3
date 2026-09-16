@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2016 Uber Technologies, Inc.
@@ -26,20 +27,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/cluster/services"
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/client"
 	"github.com/m3db/m3/src/dbnode/encoding"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/storage/index"
+	"github.com/m3db/m3/src/dbnode/storage/index/convert"
 	"github.com/m3db/m3/src/dbnode/topology"
 	"github.com/m3db/m3/src/m3ninx/idx"
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/ident"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestFetchTaggedQuorumNormalOnlyOneUp(t *testing.T) {
@@ -217,11 +219,14 @@ func TestFetchTaggedQuorumAddNodeAllUp(t *testing.T) {
 	testFetch.assertFailsTaggedResult(t, topology.ReadConsistencyLevelAll)
 }
 
-type testFetchFn func(topology.ReadConsistencyLevel) (encoding.SeriesIterators, bool, error)
+type testFetchFn func(
+	asOption topology.ReadConsistencyLevel,
+	asArg *topology.ReadConsistencyLevel,
+) (encoding.SeriesIterators, bool, error)
 
 func (fn testFetchFn) assertContainsTaggedResult(t *testing.T, lvls ...topology.ReadConsistencyLevel) {
-	for _, lvl := range lvls {
-		iters, exhaust, err := fn(lvl)
+	checkFn := func(asOption topology.ReadConsistencyLevel, asArg *topology.ReadConsistencyLevel) {
+		iters, exhaust, err := fn(asOption, asArg)
 		require.NoError(t, err)
 		require.True(t, exhaust)
 		require.Equal(t, 1, iters.Len())
@@ -236,12 +241,27 @@ func (fn testFetchFn) assertContainsTaggedResult(t *testing.T, lvls ...topology.
 		require.False(t, iter.Next())
 		require.NoError(t, iter.Err())
 	}
+
+	for _, lvl := range lvls {
+		lvl := lvl
+		// Check with level set in options.
+		checkFn(lvl, nil)
+		// Check with level set as argument.
+		checkFn(topology.ReadConsistencyLevelNone, &lvl)
+	}
 }
 
 func (fn testFetchFn) assertFailsTaggedResult(t *testing.T, lvls ...topology.ReadConsistencyLevel) {
-	for _, lvl := range lvls {
-		_, _, err := fn(lvl)
+	checkFn := func(asOption topology.ReadConsistencyLevel, asArg *topology.ReadConsistencyLevel) {
+		_, _, err := fn(asOption, asArg)
 		assert.Error(t, err)
+	}
+	for _, lvl := range lvls {
+		lvl := lvl
+		// Check with level set in options.
+		checkFn(lvl, nil)
+		// Check with level set as argument.
+		checkFn(topology.ReadConsistencyLevelNone, &lvl)
 	}
 }
 
@@ -283,9 +303,12 @@ func makeTestFetchTagged(
 	instances []services.ServiceInstance,
 ) (testSetups, closeFn, testFetchFn) {
 	nodes, closeFn, clientopts := makeMultiNodeSetup(t, numShards, true, false, instances)
-	testFetch := func(cLevel topology.ReadConsistencyLevel) (encoding.SeriesIterators, bool, error) {
-		clientopts := clientopts.SetReadConsistencyLevel(cLevel)
-		c, err := client.NewClient(clientopts)
+	testFetch := func(
+		asOption topology.ReadConsistencyLevel,
+		asArg *topology.ReadConsistencyLevel,
+	) (encoding.SeriesIterators, bool, error) {
+		co := clientopts.SetReadConsistencyLevel(asOption)
+		c, err := client.NewClient(co)
 		require.NoError(t, err)
 
 		s, err := c.NewSession()
@@ -295,12 +318,14 @@ func makeTestFetchTagged(
 		require.NoError(t, err)
 
 		startTime := nodes[0].NowFn()()
-		series, metadata, err := s.FetchTagged(testNamespaces[0],
+		series, metadata, err := s.FetchTagged(ContextWithDefaultTimeout(),
+			testNamespaces[0],
 			index.Query{Query: q},
 			index.QueryOptions{
-				StartInclusive: startTime.Add(-time.Minute),
-				EndExclusive:   startTime.Add(time.Minute),
-				SeriesLimit:    100,
+				StartInclusive:       startTime.Add(-time.Minute),
+				EndExclusive:         startTime.Add(time.Minute),
+				SeriesLimit:          100,
+				ReadConsistencyLevel: asArg,
 			})
 		return series, metadata.Exhaustive, err
 	}
@@ -312,11 +337,11 @@ func writeTagged(
 	t *testing.T,
 	nodes ...TestSetup,
 ) {
-	ctx := context.NewContext()
+	ctx := context.NewBackground()
 	defer ctx.BlockingClose()
 	for _, n := range nodes {
 		require.NoError(t, n.DB().WriteTagged(ctx, testNamespaces[0], ident.StringID("quorumTest"),
-			ident.NewTagsIterator(ident.NewTags(ident.StringTag("foo", "bar"), ident.StringTag("boo", "baz"))),
+			convert.NewTagsMetadataResolver(ident.NewTags(ident.StringTag("foo", "bar"), ident.StringTag("boo", "baz"))),
 			n.NowFn()(), 42, xtime.Second, nil))
 	}
 }

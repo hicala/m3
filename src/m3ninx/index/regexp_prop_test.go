@@ -1,4 +1,6 @@
+//go:build big
 // +build big
+
 //
 // Copyright (c) 2018 Uber Technologies, Inc.
 //
@@ -77,10 +79,9 @@ func TestRegexpCompilationProperty(t *testing.T) {
 func compileRegexp(x string, t *testing.T) *regexp.Regexp {
 	ast, err := parseRegexp(x)
 	require.NoError(t, err)
-	astp, err := ensureRegexpUnanchored(ast)
+	astp, err := EnsureRegexpUnanchored(ast)
 	require.NoError(t, err)
-	ast2p, err := ensureRegexpAnchored(astp)
-	require.NoError(t, err)
+	ast2p := EnsureRegexpAnchored(astp)
 	re, err := regexp.Compile(ast2p.String())
 	require.NoError(t, err)
 	return re

@@ -24,8 +24,12 @@ import (
 	"fmt"
 	re "regexp"
 	"regexp/syntax"
+	"sync"
+
+	"github.com/uber-go/tally"
 
 	fstregexp "github.com/m3db/m3/src/m3ninx/index/segment/fst/regexp"
+	"github.com/m3db/m3/src/x/cache"
 )
 
 var (
@@ -42,6 +46,60 @@ func init() {
 	dotStarCompiledRegex = re
 }
 
+var (
+	// cache for regexes, as per Go std lib:
+	// A Regexp is safe for concurrent use by multiple goroutines, except for
+	// configuration methods, such as Longest.
+	// The vellum Regexp is also safe for concurrent use as it is query for
+	// states but does not mutate internal state.
+	regexpCacheLock    sync.RWMutex
+	regexpCache        *cache.LRU
+	regexpCacheSize    int
+	regexpCacheMetrics *cacheMetrics
+)
+
+type cacheMetrics struct {
+	hit           tally.Counter
+	miss          tally.Counter
+	unwrapSuccess tally.Counter
+	unwrapError   tally.Counter
+}
+
+// RegexpCacheOptions is a set of regexp cache options.
+type RegexpCacheOptions struct {
+	Size  int
+	Scope tally.Scope
+}
+
+// SetRegexpCacheOptions sets the regex cache options, size zero disables cache.
+func SetRegexpCacheOptions(opts RegexpCacheOptions) {
+	regexpCacheLock.Lock()
+	defer regexpCacheLock.Unlock()
+
+	if opts.Size < 1 {
+		regexpCache = nil
+		regexpCacheMetrics = nil
+		return
+	}
+
+	scope := tally.NoopScope
+	if opts.Scope != nil {
+		scope = opts.Scope
+	}
+
+	scope = scope.SubScope("m3ninx").SubScope("regexp").SubScope("cache")
+	regexpCache = cache.NewLRU(&cache.LRUOptions{
+		MaxEntries: opts.Size,
+		Metrics:    scope.SubScope("lru"),
+	})
+	regexpCacheMetrics = &cacheMetrics{
+		hit:           scope.Counter("hit"),
+		miss:          scope.Counter("miss"),
+		unwrapSuccess: scope.SubScope("unwrap").Counter("success"),
+		unwrapError:   scope.SubScope("unwrap").Counter("error"),
+	}
+}
+
 // DotStarCompiledRegex returns a regexp which matches ".*".
 func DotStarCompiledRegex() CompiledRegex {
 	return dotStarCompiledRegex
@@ -54,8 +112,30 @@ func CompileRegex(r []byte) (CompiledRegex, error) {
 	// Due to peculiarities in the implementation of Vellum, we have to make certain modifications
 	// to all incoming regular expressions to ensure compatibility between them.
 
-	// first, we parse the regular expression into the equivalent regex
 	reString := string(r)
+
+	// Check cache first.
+	regexpCacheLock.RLock()
+	cacheLRU := regexpCache
+	cacheLRUMetrics := regexpCacheMetrics
+	regexpCacheLock.RUnlock()
+
+	if cacheLRU != nil && cacheLRUMetrics != nil {
+		cached, ok := regexpCache.TryGet(reString)
+		if !ok {
+			cacheLRUMetrics.miss.Inc(1)
+		} else {
+			cacheLRUMetrics.hit.Inc(1)
+			if unwrapped, ok := cached.(*CompiledRegex); ok {
+				cacheLRUMetrics.unwrapSuccess.Inc(1)
+				return *unwrapped, nil
+			}
+			// Unable to unwrap into expected type.
+			cacheLRUMetrics.unwrapError.Inc(1)
+		}
+	}
+
+	// first, we parse the regular expression into the equivalent regex
 	reAst, err := parseRegexp(reString)
 	if err != nil {
 		return CompiledRegex{}, err
@@ -64,7 +144,7 @@ func CompileRegex(r []byte) (CompiledRegex, error) {
 	// Issue (a): Vellum does not allow regexps which use characters '^', or '$'.
 	// To address this issue, we strip these characters from appropriate locations in the parsed syntax.Regexp
 	// for Vellum's RE.
-	vellumRe, err := ensureRegexpUnanchored(reAst)
+	vellumRe, err := EnsureRegexpUnanchored(reAst)
 	if err != nil {
 		return CompiledRegex{}, fmt.Errorf("unable to create FST re: %v", err)
 	}
@@ -72,10 +152,7 @@ func CompileRegex(r []byte) (CompiledRegex, error) {
 	// Issue (b): Vellum treats every regular expression as anchored, where as the map-backed segment does not.
 	// To address this issue, we ensure that every incoming regular expression is modified to be anchored
 	// when querying the map-backed segment, and isn't anchored when querying Vellum's RE.
-	simpleRe, err := ensureRegexpAnchored(vellumRe)
-	if err != nil {
-		return CompiledRegex{}, fmt.Errorf("unable to create map re: %v", err)
-	}
+	simpleRe := EnsureRegexpAnchored(vellumRe)
 
 	simpleRE, err := re.Compile(simpleRe.String())
 	if err != nil {
@@ -94,6 +171,14 @@ func CompileRegex(r []byte) (CompiledRegex, error) {
 	compiledRegex.PrefixBegin = start
 	compiledRegex.PrefixEnd = end
 
+	// Update cache if cache existed when we checked.
+	if cacheLRU != nil {
+		// Copy of compiled regex.
+		copied := compiledRegex
+		// No need to lock on Put since cache is locked.
+		cacheLRU.Put(reString, &copied)
+	}
+
 	return compiledRegex, nil
 }
 
@@ -101,32 +186,32 @@ func parseRegexp(re string) (*syntax.Regexp, error) {
 	return syntax.Parse(re, syntax.Perl)
 }
 
-// ensureRegexpAnchored adds '^' and '$' characters to appropriate locations in the parsed syntax.Regexp,
-// to ensure every input regular expression is converted to it's equivalent anchored regular expression.
+// EnsureRegexpAnchored adds '^' and '$' characters to appropriate locations in the parsed syntax.Regexp,
+// to ensure every input regular expression is converted to its equivalent anchored regular expression.
 // NB: assumes input regexp AST is un-anchored.
-func ensureRegexpAnchored(unanchoredRegexp *syntax.Regexp) (*syntax.Regexp, error) {
+func EnsureRegexpAnchored(unanchoredRegexp *syntax.Regexp) *syntax.Regexp {
 	ast := &syntax.Regexp{
 		Op:    syntax.OpConcat,
 		Flags: syntax.Perl,
 		Sub: []*syntax.Regexp{
-			&syntax.Regexp{
+			{
 				Op:    syntax.OpBeginText,
 				Flags: syntax.Perl,
 			},
 			unanchoredRegexp,
-			&syntax.Regexp{
+			{
 				Op:    syntax.OpEndText,
 				Flags: syntax.Perl,
 			},
 		},
 	}
-	return simplify(ast.Simplify()), nil
+	return simplify(ast.Simplify())
 }
 
-// ensureRegexpUnanchored strips '^' and '$' characters from appropriate locations in the parsed syntax.Regexp,
-// to ensure every input regular expression is converted to it's equivalent un-anchored regular expression
+// EnsureRegexpUnanchored strips '^' and '$' characters from appropriate locations in the parsed syntax.Regexp,
+// to ensure every input regular expression is converted to its equivalent un-anchored regular expression
 // assuming the entire input is matched.
-func ensureRegexpUnanchored(parsed *syntax.Regexp) (*syntax.Regexp, error) {
+func EnsureRegexpUnanchored(parsed *syntax.Regexp) (*syntax.Regexp, error) {
 	r, _, err := ensureRegexpUnanchoredHelper(parsed, true, true)
 	if err != nil {
 		return nil, err
@@ -228,7 +313,7 @@ func ensureRegexpUnanchoredHelper(parsed *syntax.Regexp, leftmost, rightmost boo
 				Op:    syntax.OpConcat,
 				Flags: parsed.Flags,
 				Sub: []*syntax.Regexp{
-					&syntax.Regexp{
+					{
 						Op:    syntax.OpQuest,
 						Flags: parsed.Flags,
 						Sub: []*syntax.Regexp{
@@ -254,7 +339,7 @@ func ensureRegexpUnanchoredHelper(parsed *syntax.Regexp, leftmost, rightmost boo
 				Flags: parsed.Flags,
 				Sub: []*syntax.Regexp{
 					newRe,
-					&syntax.Regexp{
+					{
 						Op:    syntax.OpStar,
 						Flags: parsed.Flags,
 						Sub: []*syntax.Regexp{

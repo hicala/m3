@@ -21,78 +21,28 @@
 package writer
 
 import (
+	"fmt"
+	"math/rand"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/m3db/m3/src/msg/producer"
-	"github.com/m3db/m3/src/x/instrument"
-	"github.com/m3db/m3/src/x/retry"
-	xtest "github.com/m3db/m3/src/x/test"
-
 	"github.com/fortytw2/leaktest"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 	"github.com/uber-go/tally"
+	"go.uber.org/atomic"
+
+	"github.com/m3db/m3/src/msg/generated/proto/msgpb"
+	"github.com/m3db/m3/src/msg/producer"
+	"github.com/m3db/m3/src/msg/protocol/proto"
+	"github.com/m3db/m3/src/x/instrument"
+	"github.com/m3db/m3/src/x/retry"
+	xtest "github.com/m3db/m3/src/x/test"
 )
 
-func TestMessageWriterRandomIndex(t *testing.T) {
-	indexes := make([]int, 10)
-	reset := func() {
-		for i := range indexes {
-			indexes[i] = i
-		}
-	}
-
-	reset()
-	firstIdx := randIndex(indexes, len(indexes)-1)
-	for {
-		reset()
-		newIdx := randIndex(indexes, len(indexes)-1)
-		// Make sure the first index is random.
-		if firstIdx != newIdx {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	reset()
-	idx1 := randIndex(indexes, len(indexes)-1)
-	idx2 := randIndex(indexes, len(indexes)-2)
-	for {
-		reset()
-		newIdx1 := randIndex(indexes, len(indexes)-1)
-		newIdx2 := randIndex(indexes, len(indexes)-2)
-		// Make sure the order is random.
-		if idx2-idx1 != newIdx2-newIdx1 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-func TestMessageWriterRandomFullIteration(t *testing.T) {
-	indexes := make([]int, 100)
-	var indexMap map[int]struct{}
-	reset := func() {
-		for i := range indexes {
-			indexes[i] = i
-		}
-		indexMap = make(map[int]struct{}, 100)
-	}
-
-	for n := 0; n < 1000; n++ {
-		reset()
-		for i := len(indexes) - 1; i >= 0; i-- {
-			idx := randIndex(indexes, i)
-			indexMap[idx] = struct{}{}
-		}
-		require.Equal(t, 100, len(indexMap))
-	}
-}
-
-func TestMessageWriterWithPooling(t *testing.T) {
+func TestMessageWriter(t *testing.T) {
 	defer leaktest.Check(t)()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -111,7 +61,7 @@ func TestMessageWriterWithPooling(t *testing.T) {
 		wg.Done()
 	}()
 
-	w := newMessageWriter(200, testMessagePool(opts), opts, testMessageWriterMetrics()).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
 	require.Equal(t, 200, int(w.ReplicatedShardID()))
 	w.Init()
 
@@ -160,7 +110,7 @@ func TestMessageWriterWithPooling(t *testing.T) {
 	require.Equal(t, 1, w.queue.Len())
 
 	mm2.EXPECT().Finalize(producer.Consumed)
-	w.Ack(metadata{shard: 200, id: 2})
+	w.Ack(metadata{metadataKey: metadataKey{shard: 200, id: 2}})
 	require.True(t, isEmptyWithLock(w.acks))
 	for {
 		w.RLock()
@@ -175,7 +125,7 @@ func TestMessageWriterWithPooling(t *testing.T) {
 	w.Close()
 }
 
-func TestMessageWriterWithoutPooling(t *testing.T) {
+func TestMessageWriterRetry(t *testing.T) {
 	defer leaktest.Check(t)()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -184,90 +134,7 @@ func TestMessageWriterWithoutPooling(t *testing.T) {
 
 	addr := lis.Addr().String()
 	opts := testOptions()
-
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	wg.Add(1)
-	go func() {
-		testConsumeAndAckOnConnectionListener(t, lis, opts.EncoderOptions(), opts.DecoderOptions())
-		wg.Done()
-	}()
-
-	w := newMessageWriter(200, nil, opts, testMessageWriterMetrics()).(*messageWriterImpl)
-	require.Equal(t, 200, int(w.ReplicatedShardID()))
-	w.Init()
-
-	a := newAckRouter(1)
-	a.Register(200, w)
-
-	cw := newConsumerWriter(addr, a, opts, testConsumerWriterMetrics())
-	cw.Init()
-	defer cw.Close()
-
-	w.AddConsumerWriter(cw)
-
-	ctrl := xtest.NewController(t)
-	defer ctrl.Finish()
-
-	mm1 := producer.NewMockMessage(ctrl)
-	mm1.EXPECT().Bytes().Return([]byte("foo")).Times(1)
-	mm1.EXPECT().Size().Return(3).Times(1)
-	mm1.EXPECT().Finalize(producer.Consumed)
-
-	w.Write(producer.NewRefCountedMessage(mm1, nil))
-
-	for {
-		w.RLock()
-		l := w.queue.Len()
-		w.RUnlock()
-		if l == 0 {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	require.Equal(t, 0, w.queue.Len())
-	w.RemoveConsumerWriter(addr)
-
-	mm2 := producer.NewMockMessage(ctrl)
-	mm2.EXPECT().Bytes().Return([]byte("bar")).Times(1)
-	mm2.EXPECT().Size().Return(3).Times(1)
-
-	w.Write(producer.NewRefCountedMessage(mm2, nil))
-	for {
-		if !isEmptyWithLock(w.acks) {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	require.Equal(t, 1, w.queue.Len())
-
-	mm2.EXPECT().Finalize(producer.Consumed)
-	w.Ack(metadata{shard: 200, id: 2})
-	require.True(t, isEmptyWithLock(w.acks))
-	for {
-		w.RLock()
-		l := w.queue.Len()
-		w.RUnlock()
-		if l == 0 {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	w.Close()
-	w.Close()
-}
-
-func TestMessageWriterRetryWithoutPooling(t *testing.T) {
-	defer leaktest.Check(t)()
-
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer lis.Close()
-
-	addr := lis.Addr().String()
-	opts := testOptions()
-	w := newMessageWriter(200, nil, opts, testMessageWriterMetrics()).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
 	w.Init()
 	defer w.Close()
 
@@ -295,8 +162,11 @@ func TestMessageWriterRetryWithoutPooling(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	_, ok := w.acks.ackMap[metadata{shard: 200, id: 1}]
+	require.Equal(t, 1, w.acks.size())
+	w.acks.mtx.Lock()
+	_, ok := w.acks.acks[uint64(1)]
 	require.True(t, ok)
+	w.acks.mtx.Unlock()
 
 	cw := newConsumerWriter(addr, a, opts, testConsumerWriterMetrics())
 	cw.Init()
@@ -316,78 +186,13 @@ func TestMessageWriterRetryWithoutPooling(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-}
-
-func TestMessageWriterRetryWithPooling(t *testing.T) {
-	defer leaktest.Check(t)()
-
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer lis.Close()
-
-	addr := lis.Addr().String()
-	opts := testOptions()
-	w := newMessageWriter(200, testMessagePool(opts), opts, testMessageWriterMetrics()).(*messageWriterImpl)
-	w.Init()
-	defer w.Close()
-
-	a := newAckRouter(1)
-	a.Register(200, w)
-
-	ctrl := xtest.NewController(t)
-	defer ctrl.Finish()
-
-	mm := producer.NewMockMessage(ctrl)
-	mm.EXPECT().Bytes().Return([]byte("foo")).AnyTimes()
-	mm.EXPECT().Size().Return(3).Times(1)
-	mm.EXPECT().Finalize(producer.Consumed)
-
-	rm := producer.NewRefCountedMessage(mm, nil)
-	w.Write(rm)
-
-	w.AddConsumerWriter(newConsumerWriter("bad", a, opts, testConsumerWriterMetrics()))
-	require.Equal(t, 1, w.queue.Len())
-
-	for {
-		if !isEmptyWithLock(w.acks) {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	m1, ok := w.acks.ackMap[metadata{shard: 200, id: 1}]
-	require.True(t, ok)
-
-	cw := newConsumerWriter(addr, a, opts, testConsumerWriterMetrics())
-	cw.Init()
-	defer cw.Close()
-
-	w.AddConsumerWriter(cw)
-	go func() {
-		testConsumeAndAckOnConnectionListener(t, lis, opts.EncoderOptions(), opts.DecoderOptions())
-	}()
-
-	for {
-		w.Lock()
-		l := w.queue.Len()
-		w.Unlock()
-		if l == 0 {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// A get will NOT allocate a new message because the old one has been returned to pool.
-	m := w.mPool.Get()
-	require.Equal(t, m1, m)
-	require.True(t, m.IsDroppedOrConsumed())
 }
 
 func TestMessageWriterCleanupDroppedMessage(t *testing.T) {
 	defer leaktest.Check(t)()
 
 	opts := testOptions()
-	w := newMessageWriter(200, testMessagePool(opts), opts, testMessageWriterMetrics())
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
 
 	ctrl := xtest.NewController(t)
 	defer ctrl.Finish()
@@ -402,34 +207,30 @@ func TestMessageWriterCleanupDroppedMessage(t *testing.T) {
 	w.Write(rm)
 
 	// A get will allocate a new message because the old one has not been returned to pool yet.
-	m := w.(*messageWriterImpl).mPool.Get()
+	m := w.mPool.Get()
 	require.Nil(t, m.RefCountedMessage)
 
-	require.Equal(t, 1, w.(*messageWriterImpl).queue.Len())
+	require.Equal(t, 1, w.queue.Len())
 	w.Init()
 	defer w.Close()
 
 	for {
-		w.(*messageWriterImpl).Lock()
-		l := w.(*messageWriterImpl).queue.Len()
-		w.(*messageWriterImpl).Unlock()
+		w.Lock()
+		l := w.queue.Len()
+		w.Unlock()
 		if l != 1 {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	require.True(t, isEmptyWithLock(w.(*messageWriterImpl).acks))
-
-	// A get will NOT allocate a new message because the old one has been returned to pool.
-	m = w.(*messageWriterImpl).mPool.Get()
-	require.True(t, m.IsDroppedOrConsumed())
+	require.True(t, isEmptyWithLock(w.acks))
 }
 
 func TestMessageWriterCleanupAckedMessage(t *testing.T) {
 	defer leaktest.Check(t)()
 
 	opts := testOptions()
-	w := newMessageWriter(200, testMessagePool(opts), opts, testMessageWriterMetrics()).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
 	w.Init()
 	defer w.Close()
 
@@ -453,8 +254,10 @@ func TestMessageWriterCleanupAckedMessage(t *testing.T) {
 	}
 	acks := w.acks
 	meta := metadata{
-		id:    1,
-		shard: 200,
+		metadataKey: metadataKey{
+			id:    1,
+			shard: 200,
+		},
 	}
 	// The message will not be finalized because it's still being hold by another message writer.
 	acks.ack(meta)
@@ -474,29 +277,26 @@ func TestMessageWriterCleanupAckedMessage(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-
-	// A get will NOT allocate a new message because the old one has been returned to pool.
-	m = w.mPool.Get()
-	require.Equal(t, meta, m.Metadata())
 }
 
 func TestMessageWriterCutoverCutoff(t *testing.T) {
 	ctrl := xtest.NewController(t)
 	defer ctrl.Finish()
 
-	w := newMessageWriter(200, testMessagePool(testOptions()), nil, testMessageWriterMetrics()).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), nil, testMessageWriterMetrics())
 	now := time.Now()
 	w.nowFn = func() time.Time { return now }
-	require.True(t, w.isValidWriteWithLock(now.UnixNano()))
-	require.True(t, w.isValidWriteWithLock(now.UnixNano()+150))
-	require.True(t, w.isValidWriteWithLock(now.UnixNano()+250))
-	require.True(t, w.isValidWriteWithLock(now.UnixNano()+50))
+	met := w.Metrics()
+	require.True(t, w.isValidWriteWithLock(now.UnixNano(), met))
+	require.True(t, w.isValidWriteWithLock(now.UnixNano()+150, met))
+	require.True(t, w.isValidWriteWithLock(now.UnixNano()+250, met))
+	require.True(t, w.isValidWriteWithLock(now.UnixNano()+50, met))
 
 	w.SetCutoffNanos(now.UnixNano() + 200)
 	w.SetCutoverNanos(now.UnixNano() + 100)
-	require.True(t, w.isValidWriteWithLock(now.UnixNano()+150))
-	require.False(t, w.isValidWriteWithLock(now.UnixNano()+250))
-	require.False(t, w.isValidWriteWithLock(now.UnixNano()+50))
+	require.True(t, w.isValidWriteWithLock(now.UnixNano()+150, met))
+	require.False(t, w.isValidWriteWithLock(now.UnixNano()+250, met))
+	require.False(t, w.isValidWriteWithLock(now.UnixNano()+50, met))
 	require.Equal(t, 0, w.queue.Len())
 
 	mm := producer.NewMockMessage(ctrl)
@@ -505,14 +305,39 @@ func TestMessageWriterCutoverCutoff(t *testing.T) {
 	require.Equal(t, 0, w.queue.Len())
 }
 
+func TestMessageWriterIgnoreCutoverCutoff(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	opts := NewOptions().SetIgnoreCutoffCutover(true)
+
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
+	now := time.Now()
+	w.nowFn = func() time.Time { return now }
+
+	w.SetCutoffNanos(now.UnixNano() + 200)
+	w.SetCutoverNanos(now.UnixNano() + 100)
+	met := w.Metrics()
+	require.True(t, w.isValidWriteWithLock(now.UnixNano()+150, met))
+	require.True(t, w.isValidWriteWithLock(now.UnixNano()+250, met))
+	require.True(t, w.isValidWriteWithLock(now.UnixNano()+50, met))
+	require.Equal(t, 0, w.queue.Len())
+
+	mm := producer.NewMockMessage(ctrl)
+	mm.EXPECT().Bytes().Return([]byte("foo"))
+	mm.EXPECT().Size().Return(3)
+	w.Write(producer.NewRefCountedMessage(mm, nil))
+	require.Equal(t, 1, w.queue.Len())
+}
+
 func TestMessageWriterKeepNewWritesInOrderInFrontOfTheQueue(t *testing.T) {
 	ctrl := xtest.NewController(t)
 	defer ctrl.Finish()
 
-	opts := testOptions().SetMessageRetryOptions(
-		retry.NewOptions().SetInitialBackoff(2 * time.Nanosecond).SetMaxBackoff(5 * time.Nanosecond),
+	opts := testOptions().SetMessageRetryNanosFn(
+		NextRetryNanosFn(retry.NewOptions().SetInitialBackoff(2 * time.Nanosecond).SetMaxBackoff(5 * time.Nanosecond)),
 	)
-	w := newMessageWriter(200, testMessagePool(opts), opts, testMessageWriterMetrics()).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
 
 	now := time.Now()
 	w.nowFn = func() time.Time { return now }
@@ -529,7 +354,7 @@ func TestMessageWriterKeepNewWritesInOrderInFrontOfTheQueue(t *testing.T) {
 	mm2.EXPECT().Bytes().Return([]byte("2")).AnyTimes()
 	w.Write(rm2)
 	validateMessages(t, []*producer.RefCountedMessage{rm1, rm2}, w)
-	w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), 2, true)
+	w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), 2, true, &scanBatchMetrics{})
 
 	w.lastNewWrite = nil
 	mm3 := producer.NewMockMessage(ctrl)
@@ -553,10 +378,10 @@ func TestMessageWriterRetryIterateBatchFullScan(t *testing.T) {
 	defer ctrl.Finish()
 
 	retryBatchSize := 2
-	opts := testOptions().SetMessageQueueScanBatchSize(retryBatchSize).SetMessageRetryOptions(
-		retry.NewOptions().SetInitialBackoff(2 * time.Nanosecond).SetMaxBackoff(5 * time.Nanosecond),
+	opts := testOptions().SetMessageQueueScanBatchSize(retryBatchSize).SetMessageRetryNanosFn(
+		NextRetryNanosFn(retry.NewOptions().SetInitialBackoff(2 * time.Nanosecond).SetMaxBackoff(5 * time.Nanosecond)),
 	)
-	w := newMessageWriter(200, testMessagePool(opts), opts, testMessageWriterMetrics()).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
 
 	now := time.Now()
 	w.nowFn = func() time.Time { return now }
@@ -589,7 +414,7 @@ func TestMessageWriterRetryIterateBatchFullScan(t *testing.T) {
 	mm1.EXPECT().Finalize(gomock.Eq(producer.Dropped))
 	rm1.Drop()
 	require.Equal(t, 4, w.queue.Len())
-	e, toBeRetried := w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, true)
+	e, toBeRetried := w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, true, &scanBatchMetrics{})
 	require.Equal(t, 1, len(toBeRetried))
 	require.Equal(t, 3, w.queue.Len())
 
@@ -597,30 +422,31 @@ func TestMessageWriterRetryIterateBatchFullScan(t *testing.T) {
 	require.Equal(t, rm3, e.Value.(*message).RefCountedMessage)
 
 	require.Equal(t, 3, w.queue.Len())
-	e, toBeRetried = w.scanBatchWithLock(e, w.nowFn().UnixNano(), retryBatchSize, true)
+	e, toBeRetried = w.scanBatchWithLock(e, w.nowFn().UnixNano(), retryBatchSize, true, &scanBatchMetrics{})
 	require.Nil(t, e)
 	require.Equal(t, 2, len(toBeRetried))
 	require.Equal(t, 3, w.queue.Len())
 
-	e, toBeRetried = w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, true)
+	e, toBeRetried = w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, true, &scanBatchMetrics{})
 	// Make sure it stopped at rm4.
 	require.Equal(t, rm4, e.Value.(*message).RefCountedMessage)
 	require.Equal(t, 0, len(toBeRetried))
 
-	e, toBeRetried = w.scanBatchWithLock(e, w.nowFn().UnixNano(), retryBatchSize, true)
+	e, toBeRetried = w.scanBatchWithLock(e, w.nowFn().UnixNano(), retryBatchSize, true, &scanBatchMetrics{})
 	require.Nil(t, e)
 	require.Equal(t, 0, len(toBeRetried))
 }
 
+//nolint:lll
 func TestMessageWriterRetryIterateBatchFullScanWithMessageTTL(t *testing.T) {
 	ctrl := xtest.NewController(t)
 	defer ctrl.Finish()
 
 	retryBatchSize := 2
-	opts := testOptions().SetMessageQueueScanBatchSize(retryBatchSize).SetMessageRetryOptions(
-		retry.NewOptions().SetInitialBackoff(2 * time.Nanosecond).SetMaxBackoff(5 * time.Nanosecond),
+	opts := testOptions().SetMessageQueueScanBatchSize(retryBatchSize).SetMessageRetryNanosFn(
+		NextRetryNanosFn(retry.NewOptions().SetInitialBackoff(2 * time.Nanosecond).SetMaxBackoff(5 * time.Nanosecond)),
 	)
-	w := newMessageWriter(200, testMessagePool(opts), opts, testMessageWriterMetrics()).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
 
 	now := time.Now()
 	w.nowFn = func() time.Time { return now }
@@ -652,7 +478,7 @@ func TestMessageWriterRetryIterateBatchFullScanWithMessageTTL(t *testing.T) {
 	mm1.EXPECT().Finalize(gomock.Eq(producer.Dropped))
 	rm1.Drop()
 	require.Equal(t, 4, w.queue.Len())
-	e, toBeRetried := w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, true)
+	e, toBeRetried := w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, true, &scanBatchMetrics{})
 	require.Equal(t, 1, len(toBeRetried))
 	require.Equal(t, 3, w.queue.Len())
 
@@ -661,27 +487,28 @@ func TestMessageWriterRetryIterateBatchFullScanWithMessageTTL(t *testing.T) {
 	w.SetMessageTTLNanos(int64(time.Minute))
 	mm4.EXPECT().Finalize(gomock.Eq(producer.Consumed))
 	mm3.EXPECT().Finalize(gomock.Eq(producer.Consumed))
-	e, toBeRetried = w.scanBatchWithLock(e, w.nowFn().UnixNano()+int64(time.Hour), retryBatchSize, true)
+	e, toBeRetried = w.scanBatchWithLock(e, w.nowFn().UnixNano()+int64(time.Hour), retryBatchSize, true, &scanBatchMetrics{})
 	require.Equal(t, 0, len(toBeRetried))
 	require.Equal(t, 1, w.queue.Len())
 	require.Nil(t, e)
 
 	mm2.EXPECT().Finalize(gomock.Eq(producer.Consumed))
-	e, toBeRetried = w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano()+int64(time.Hour), retryBatchSize, true)
+	e, toBeRetried = w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano()+int64(time.Hour), retryBatchSize, true, &scanBatchMetrics{})
 	require.Equal(t, 0, len(toBeRetried))
 	require.Equal(t, 0, w.queue.Len())
 	require.Nil(t, e)
 }
 
+//nolint:lll
 func TestMessageWriterRetryIterateBatchNotFullScan(t *testing.T) {
 	ctrl := xtest.NewController(t)
 	defer ctrl.Finish()
 
 	retryBatchSize := 100
-	opts := testOptions().SetMessageQueueScanBatchSize(retryBatchSize).SetMessageRetryOptions(
-		retry.NewOptions().SetInitialBackoff(2 * time.Nanosecond).SetMaxBackoff(5 * time.Nanosecond),
+	opts := testOptions().SetMessageQueueScanBatchSize(retryBatchSize).SetMessageRetryNanosFn(
+		NextRetryNanosFn(retry.NewOptions().SetInitialBackoff(2 * time.Nanosecond).SetMaxBackoff(5 * time.Nanosecond)),
 	)
-	w := newMessageWriter(200, testMessagePool(opts), opts, testMessageWriterMetrics()).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
 
 	now := time.Now()
 	w.nowFn = func() time.Time { return now }
@@ -713,7 +540,7 @@ func TestMessageWriterRetryIterateBatchNotFullScan(t *testing.T) {
 	mm1.EXPECT().Finalize(gomock.Eq(producer.Dropped))
 	rm1.Drop()
 	require.Equal(t, 4, w.queue.Len())
-	e, toBeRetried := w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, false)
+	e, toBeRetried := w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, false, &scanBatchMetrics{})
 	require.Equal(t, 3, len(toBeRetried))
 	require.Equal(t, 3, w.queue.Len())
 	require.Nil(t, e)
@@ -723,7 +550,7 @@ func TestMessageWriterRetryIterateBatchNotFullScan(t *testing.T) {
 	mm4.EXPECT().Finalize(gomock.Eq(producer.Dropped))
 	rm4.Drop()
 	require.Equal(t, 3, w.queue.Len())
-	e, toBeRetried = w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, false)
+	e, toBeRetried = w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, false, &scanBatchMetrics{})
 	require.Equal(t, rm2, e.Value.(*message).RefCountedMessage)
 	require.Equal(t, 0, len(toBeRetried))
 	require.Equal(t, 3, w.queue.Len())
@@ -739,42 +566,82 @@ func TestMessageWriterRetryIterateBatchNotFullScan(t *testing.T) {
 	validateMessages(t, []*producer.RefCountedMessage{rm5, rm2, rm3, rm4}, w)
 
 	require.Equal(t, 4, w.queue.Len())
-	e, toBeRetried = w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, false)
+	e, toBeRetried = w.scanBatchWithLock(w.queue.Front(), w.nowFn().UnixNano(), retryBatchSize, false, &scanBatchMetrics{})
 	require.Equal(t, rm2, e.Value.(*message).RefCountedMessage)
 	require.Equal(t, 1, len(toBeRetried))
 	require.Equal(t, rm5, toBeRetried[0].RefCountedMessage)
 	require.Equal(t, 4, w.queue.Len())
 }
 
-func TestNextRetryNanos(t *testing.T) {
+func TestNextRetryAfterNanos(t *testing.T) {
 	backoffDuration := time.Minute
-	opts := testOptions().SetMessageRetryOptions(
-		retry.NewOptions().SetInitialBackoff(backoffDuration).SetMaxBackoff(2 * backoffDuration).SetJitter(true),
-	)
-	w := newMessageWriter(200, nil, opts, testMessageWriterMetrics()).(*messageWriterImpl)
+	opts := testOptions().
+		SetMessageRetryNanosFn(
+			NextRetryNanosFn(
+				retry.NewOptions().
+					SetInitialBackoff(backoffDuration).
+					SetMaxBackoff(2 * backoffDuration).
+					SetJitter(true),
+			),
+		)
+	w := newMessageWriter(200, nil, opts, testMessageWriterMetrics())
 
 	nowNanos := time.Now().UnixNano()
 	m := newMessage()
 	m.IncWriteTimes()
-	retryAtNanos := w.nextRetryNanos(m.WriteTimes(), nowNanos)
+	retryAtNanos := w.nextRetryAfterNanos(m.WriteTimes()) + nowNanos
 	require.True(t, retryAtNanos > nowNanos)
 	require.True(t, retryAtNanos < nowNanos+int64(backoffDuration))
 
 	m.IncWriteTimes()
-	retryAtNanos = w.nextRetryNanos(m.WriteTimes(), nowNanos)
+	retryAtNanos = w.nextRetryAfterNanos(m.WriteTimes()) + nowNanos
 	require.True(t, retryAtNanos >= nowNanos+int64(backoffDuration))
 	require.True(t, retryAtNanos < nowNanos+2*int64(backoffDuration))
 
 	m.IncWriteTimes()
-	retryAtNanos = w.nextRetryNanos(m.WriteTimes(), nowNanos)
+	retryAtNanos = w.nextRetryAfterNanos(m.WriteTimes()) + nowNanos
 	require.True(t, retryAtNanos == nowNanos+2*int64(backoffDuration))
+}
+
+func TestStaticRetryAfterNanos(t *testing.T) {
+	fn, err := StaticRetryNanosFn([]time.Duration{time.Minute, 10 * time.Second, 5 * time.Second})
+	require.NoError(t, err)
+
+	opts := testOptions().SetMessageRetryNanosFn(fn)
+	w := newMessageWriter(200, nil, opts, testMessageWriterMetrics())
+
+	m := newMessage()
+	m.IncWriteTimes()
+	retryAtNanos := w.nextRetryAfterNanos(m.WriteTimes())
+	require.Equal(t, int64(time.Minute), retryAtNanos)
+
+	m.IncWriteTimes()
+	retryAtNanos = w.nextRetryAfterNanos(m.WriteTimes())
+	require.Equal(t, int64(10*time.Second), retryAtNanos)
+
+	m.IncWriteTimes()
+	retryAtNanos = w.nextRetryAfterNanos(m.WriteTimes())
+	require.Equal(t, int64(5*time.Second), retryAtNanos)
+
+	m.IncWriteTimes()
+	retryAtNanos = w.nextRetryAfterNanos(m.WriteTimes())
+	require.Equal(t, int64(5*time.Second), retryAtNanos)
+}
+
+func TestExpectedProcessedAt(t *testing.T) {
+	m := newMessage()
+	m.initNanos = 100
+	m.SetRetryAtNanos(200)
+	require.Equal(t, int64(100), m.ExpectedProcessAtNanos())
+	m.SetRetryAtNanos(300)
+	require.Equal(t, int64(200), m.ExpectedProcessAtNanos())
 }
 
 func TestMessageWriterCloseCleanupAllMessages(t *testing.T) {
 	defer leaktest.Check(t)()
 
 	opts := testOptions()
-	w := newMessageWriter(200, nil, opts, testMessageWriterMetrics()).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
 
 	ctrl := xtest.NewController(t)
 	defer ctrl.Finish()
@@ -801,7 +668,7 @@ func TestMessageWriterQueueFullScanOnWriteErrors(t *testing.T) {
 	opts := testOptions().SetMessageQueueScanBatchSize(1)
 	scope := tally.NewTestScope("", nil)
 	metrics := testMessageWriterMetricsWithScope(scope).withConsumer("c1")
-	w := newMessageWriter(200, nil, opts, metrics).(*messageWriterImpl)
+	w := newMessageWriter(200, newMessagePool(), opts, metrics)
 	w.AddConsumerWriter(newConsumerWriter("bad", nil, opts, testConsumerWriterMetrics()))
 
 	mm1 := producer.NewMockMessage(ctrl)
@@ -829,27 +696,317 @@ func TestMessageWriterQueueFullScanOnWriteErrors(t *testing.T) {
 	require.Equal(t, int64(1), counters["message-processed+consumer=c1,result=drop"].Value())
 }
 
+func TestMessageWriter_WithoutConsumerScope(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	opts := testOptions().SetMessageQueueScanBatchSize(1)
+	scope := tally.NewTestScope("", nil)
+	metrics := newMessageWriterMetrics(scope, instrument.TimerOptions{}, true)
+	w := newMessageWriter(200, nil, opts, metrics)
+	w.AddConsumerWriter(newConsumerWriter("bad", nil, opts, testConsumerWriterMetrics()))
+
+	snapshot := scope.Snapshot()
+	counters := snapshot.Counters()
+	require.Nil(t, counters["message-processed+consumer=c1,result=write"])
+	require.NotNil(t, counters["message-processed+result=write"])
+}
+
+// processServerMessages handles reading messages from a connection and sending acknowledgments
+// It can be configured to process messages at different speeds
+func processServerMessages(
+	t *testing.T,
+	conn net.Conn,
+	opts Options,
+	processDelay time.Duration,
+	processFn func(),
+) {
+	defer conn.Close() // nolint: errcheck
+
+	// Process messages
+	for {
+		// Read message
+		serverDecoder := proto.NewDecoder(conn, opts.DecoderOptions(), 10)
+		var msg msgpb.Message
+		err := serverDecoder.Decode(&msg)
+		if err != nil {
+			// Connection closed
+			return
+		}
+
+		// Simulate processing delay if specified
+		if processDelay > 0 {
+			time.Sleep(processDelay)
+		}
+
+		processFn()
+
+		// Send ack
+		serverEncoder := proto.NewEncoder(opts.EncoderOptions())
+		err = serverEncoder.Encode(&msgpb.Ack{
+			Metadata: []msgpb.Metadata{
+				msg.Metadata,
+			},
+		})
+		require.NoError(t, err)
+		_, err = conn.Write(serverEncoder.Bytes())
+		require.NoError(t, err)
+	}
+}
+
+func TestMessageWriterChooseConsumerWriter(t *testing.T) {
+	defer leaktest.Check(t)()
+
+	// Create a mock controller for message mocking
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	// Create a wait group to wait for server goroutines
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	// Create two listeners - one for fast server, one for slow server
+	fastLis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer fastLis.Close() // nolint: errcheck
+
+	slowLis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer slowLis.Close() // nolint: errcheck
+
+	fastAddr := fastLis.Addr().String()
+	slowAddr := slowLis.Addr().String()
+	opts := testOptions()
+
+	connOpts := opts.ConnectionOptions().SetWriteBufferSize(50)
+	opts = opts.SetConnectionOptions(connOpts)
+	// set scan interval low enough to ensure that the message writes are processed
+	opts = opts.SetMessageQueueNewWritesScanInterval(2 * time.Millisecond)
+	// set the retry interval long enough to ensure that
+	// messages are not retried.
+	opts = opts.SetMessageRetryNanosFn(
+		NextRetryNanosFn(
+			retry.NewOptions().
+				SetInitialBackoff(500 * time.Millisecond).
+				SetMaxBackoff(500 * time.Millisecond),
+		),
+	)
+
+	// Create a messageWriter
+	w := newMessageWriter(200, newMessagePool(), opts, testMessageWriterMetrics())
+	require.Equal(t, 200, int(w.ReplicatedShardID()))
+	w.Init()
+	defer w.Close()
+
+	// Create an ack router
+	a := newAckRouter(1)
+	a.Register(200, w)
+
+	// Create two consumer writers
+	fastCW := newConsumerWriter(fastAddr, a, opts, testConsumerWriterMetrics())
+	fastCW.Init()
+	defer fastCW.Close() // nolint:errcheck
+
+	slowCW := newConsumerWriter(slowAddr, a, opts, testConsumerWriterMetrics())
+	slowCW.Init()
+	defer slowCW.Close()
+
+	// Add both consumer writers to the message writer
+	w.AddConsumerWriter(slowCW)
+	w.AddConsumerWriter(fastCW)
+
+	// Start the fast server
+	slowCWMsgs := 0
+	fastCWMsgs := 0
+	slowCWFn := func() {
+		slowCWMsgs++
+	}
+	fastCWFn := func() {
+		fastCWMsgs++
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := fastLis.Accept()
+		require.NoError(t, err)
+		processServerMessages(t, conn, opts, 0, fastCWFn) // No delay for fast server
+	}()
+
+	// Start the slow server
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := slowLis.Accept()
+		require.NoError(t, err)
+		processServerMessages(t, conn, opts, 100*time.Millisecond, slowCWFn) // 100ms delay for slow server
+	}()
+
+	// Create and write multiple messages
+	numMessages := 2
+
+	for i := range numMessages {
+		mm := producer.NewMockMessage(ctrl)
+		mm.EXPECT().Bytes().Return([]byte(fmt.Sprintf("message-%d", i))).AnyTimes()
+		mm.EXPECT().Size().Return(10).AnyTimes()
+		mm.EXPECT().Finalize(producer.Consumed).AnyTimes()
+
+		rm := producer.NewRefCountedMessage(mm, nil)
+		w.Write(rm)
+	}
+
+	// Wait for message to be processed
+	for {
+		w.RLock()
+		l := w.queue.Len()
+		w.RUnlock()
+		if l == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// We are sending 2 messages.
+	// If the slow CW receives the first message then the next message
+	// should be sent to the fast CW.
+	// If the fast CW receives the first message then the next message should
+	// still be sent to the fast CW.
+	// Therefore, the fast CW should see at least 1 message.
+	require.True(t, fastCWMsgs >= slowCWMsgs,
+		"Fast consumer writer should be used more often. Fast: %d, Slow: %d",
+		fastCWMsgs, slowCWMsgs)
+}
+
+func TestMessageWriterForcedFlush(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	opts := testOptions()
+	scope := tally.NewTestScope("", nil)
+	metrics := newMessageWriterMetrics(scope, instrument.TimerOptions{}, true)
+	w := newMessageWriter(200, nil, opts, metrics)
+	slowConsumerWriter := NewMockconsumerWriter(ctrl)
+	slowConsumerWriter.EXPECT().Address().Return("slow").AnyTimes()
+	slowConsumerWriter.EXPECT().AvailableBuffer(gomock.Any()).Return(1).AnyTimes()
+	slowConsumerWriter.EXPECT().ForcedFlush(gomock.Any()).DoAndReturn(func(_ int) error {
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	}).AnyTimes()
+	fastConsumerWriter := NewMockconsumerWriter(ctrl)
+	fastConsumerWriter.EXPECT().Address().Return("fast").AnyTimes()
+	fastConsumerWriter.EXPECT().AvailableBuffer(gomock.Any()).Return(10).AnyTimes()
+	fastConsumerWriter.EXPECT().ForcedFlush(gomock.Any()).Return(nil).Times(1)
+	w.AddConsumerWriter(slowConsumerWriter)
+	w.AddConsumerWriter(fastConsumerWriter)
+
+	cw := w.chooseConsumerWriter([]consumerWriter{slowConsumerWriter, fastConsumerWriter}, 0, 100)
+	require.Equal(t, fastConsumerWriter.Address(), cw.Address())
+}
+
+func TestMessageWriterBeginAndWaitForForcedFlush(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	opts := testOptions()
+	scope := tally.NewTestScope("", nil)
+	metrics := newMessageWriterMetrics(scope, instrument.TimerOptions{}, true)
+	w := newMessageWriter(200, nil, opts, metrics)
+	slowConsumerWriter := NewMockconsumerWriter(ctrl)
+	slowConsumerWriter.EXPECT().Address().Return("slow").AnyTimes()
+	slowConsumerWriter.EXPECT().AvailableBuffer(gomock.Any()).Return(1).AnyTimes()
+	slowConsumerWriter.EXPECT().ForcedFlush(gomock.Any()).DoAndReturn(func(_ int) error {
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	}).AnyTimes()
+	fastConsumerWriter := NewMockconsumerWriter(ctrl)
+	fastConsumerWriter.EXPECT().Address().Return("fast").AnyTimes()
+	fastConsumerWriter.EXPECT().AvailableBuffer(gomock.Any()).Return(10).AnyTimes()
+	fastConsumerWriter.EXPECT().ForcedFlush(gomock.Any()).Return(nil).Times(1)
+	w.AddConsumerWriter(slowConsumerWriter)
+	w.AddConsumerWriter(fastConsumerWriter)
+
+	consumerWriters := []consumerWriter{slowConsumerWriter, fastConsumerWriter}
+	doneCh := make(chan int, 2)
+	w.beginForcedFlush(doneCh, consumerWriters, 0)
+	cw := w.waitForForcedFlush(doneCh, consumerWriters)
+	require.Equal(t, fastConsumerWriter.Address(), cw.Address())
+}
+
+func TestMessageWriterForcedFlushTimeout(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	opts := testOptions()
+	connOpts := opts.ConnectionOptions()
+	opts = opts.SetConnectionOptions(connOpts.SetForcedFlushTimeout(10 * time.Millisecond))
+
+	scope := tally.NewTestScope("", nil)
+	metrics := newMessageWriterMetrics(scope, instrument.TimerOptions{}, true)
+	w := newMessageWriter(200, nil, opts, metrics)
+	slowConsumerWriter1 := NewMockconsumerWriter(ctrl)
+	slowConsumerWriter1.EXPECT().Address().Return("slow1").AnyTimes()
+	slowConsumerWriter1.EXPECT().AvailableBuffer(gomock.Any()).Return(1).AnyTimes()
+	slowConsumerWriter1.EXPECT().ForcedFlush(gomock.Any()).DoAndReturn(func(_ int) error {
+		time.Sleep(time.Second)
+		return nil
+	}).AnyTimes()
+	slowConsumerWriter2 := NewMockconsumerWriter(ctrl)
+	slowConsumerWriter2.EXPECT().Address().Return("slow2").AnyTimes()
+	slowConsumerWriter2.EXPECT().AvailableBuffer(gomock.Any()).Return(10).AnyTimes()
+	slowConsumerWriter2.EXPECT().ForcedFlush(gomock.Any()).DoAndReturn(func(_ int) error {
+		time.Sleep(time.Second)
+		return nil
+	}).AnyTimes()
+	w.AddConsumerWriter(slowConsumerWriter1)
+	w.AddConsumerWriter(slowConsumerWriter2)
+
+	consumerWriters := []consumerWriter{slowConsumerWriter1, slowConsumerWriter2}
+	doneCh := make(chan int, 2)
+	w.beginForcedFlush(doneCh, consumerWriters, 0)
+	cw := w.waitForForcedFlush(doneCh, consumerWriters)
+	require.Equal(t, nil, cw)
+}
+
+func TestMessageWriterGetConsumerWriterWithMaxBuffer(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	opts := testOptions()
+	scope := tally.NewTestScope("", nil)
+	metrics := newMessageWriterMetrics(scope, instrument.TimerOptions{}, true)
+	w := newMessageWriter(200, nil, opts, metrics)
+
+	numConsumerWriters := 100
+	cws := make([]consumerWriter, 0, numConsumerWriters)
+	for i := range numConsumerWriters {
+		cw := NewMockconsumerWriter(ctrl)
+		cw.EXPECT().Address().Return(fmt.Sprintf("addr-%d", i)).AnyTimes()
+		cw.EXPECT().AvailableBuffer(gomock.Any()).Return(i).AnyTimes()
+		w.AddConsumerWriter(cw)
+		cws = append(cws, cw)
+	}
+
+	rand.Shuffle(len(cws), func(i, j int) {
+		cws[i], cws[j] = cws[j], cws[i]
+	})
+
+	cw, maxBuf := w.getConsumerWriterWithMaxBuffer(cws, 0)
+	require.Equal(t, "addr-99", cw.Address())
+	require.Equal(t, 99, maxBuf)
+}
+
 func isEmptyWithLock(h *acks) bool {
-	h.Lock()
-	defer h.Unlock()
-	return len(h.ackMap) == 0
+	return h.size() == 0
 }
 
-func testMessagePool(opts Options) messagePool {
-	p := newMessagePool(opts.MessagePoolOptions())
-	p.Init()
-	return p
+func testMessageWriterMetrics() *messageWriterMetrics {
+	return newMessageWriterMetrics(tally.NoopScope, instrument.TimerOptions{}, false)
 }
 
-func testMessageWriterMetrics() messageWriterMetrics {
-	return newMessageWriterMetrics(tally.NoopScope, instrument.TimerOptions{})
+func testMessageWriterMetricsWithScope(scope tally.TestScope) *messageWriterMetrics {
+	return newMessageWriterMetrics(scope, instrument.TimerOptions{}, false)
 }
 
-func testMessageWriterMetricsWithScope(scope tally.TestScope) messageWriterMetrics {
-	return newMessageWriterMetrics(scope, instrument.TimerOptions{})
-}
-
-func validateMessages(t *testing.T, msgs []*producer.RefCountedMessage, w *messageWriterImpl) {
+func validateMessages(t *testing.T, msgs []*producer.RefCountedMessage, w *messageWriter) {
 	w.RLock()
 	idx := 0
 	for e := w.queue.Front(); e != nil; e = e.Next() {
@@ -858,4 +1015,216 @@ func validateMessages(t *testing.T, msgs []*producer.RefCountedMessage, w *messa
 	}
 	w.RUnlock()
 	require.Equal(t, idx, len(msgs))
+}
+
+// TestMessageWriterGracefulCloseFalse tests that with graceful close disabled,
+// isClosed is set immediately and messages are auto-acked (verified via metrics).
+func TestMessageWriterGracefulCloseFalse(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	opts := testOptions()
+	gracefulClose := &atomic.Bool{}
+	gracefulClose.Store(false)
+	opts = opts.SetGracefulClose(gracefulClose)
+	opts = opts.SetCloseCheckInterval(50 * time.Millisecond)
+	opts = opts.SetMessageQueueNewWritesScanInterval(10 * time.Millisecond)
+
+	scope := tally.NewTestScope("", nil)
+	metrics := newMessageWriterMetrics(scope, instrument.TimerOptions{}, true)
+
+	w := newMessageWriter(200, newMessagePool(), opts, metrics)
+	w.Init()
+
+	// Write a message - with graceful close this would block, but with fast shutdown it won't
+	mm := producer.NewMockMessage(ctrl)
+	mm.EXPECT().Bytes().Return([]byte("test"))
+	mm.EXPECT().Size().Return(4)
+	mm.EXPECT().Finalize(producer.Consumed) // Message will be auto-acked and finalized
+	rm := producer.NewRefCountedMessage(mm, nil)
+	w.Write(rm)
+
+	require.Equal(t, 1, w.QueueSize())
+
+	// Close the writer
+	closeDone := make(chan struct{})
+	go func() {
+		w.Close()
+		close(closeDone)
+	}()
+	time.Sleep(20 * time.Millisecond)
+
+	// Verify isClosed was set immediately (fast shutdown)
+	w.RLock()
+	isClosedValue := w.isClosed
+	w.RUnlock()
+	require.True(t, isClosedValue, "isClosed should be true immediately with graceful close disabled")
+
+	// Close should complete quickly because:
+	// 1. isClosed is set immediately (fast shutdown)
+	// 2. Scan goroutine auto-acks the message
+	// 3. waitUntilAllMessageRemoved() detects empty queue on next tick
+	select {
+	case <-closeDone:
+		// Success - fast shutdown completed quickly
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("Close() did not complete quickly with fast shutdown")
+	}
+
+	snapshot := scope.Snapshot()
+	counters := snapshot.Counters()
+
+	// The "message-closed" counter should be incremented when message is auto-acked
+	require.Equal(t, int64(1), counters["message-closed+"].Value())
+	require.Equal(t, 0, w.QueueSize())
+}
+
+// TestMessageWriterGracefulCloseTrue tests that with graceful close enabled,
+// isClosed is NOT set immediately and messages are processed normally.
+func TestMessageWriterGracefulCloseTrue(t *testing.T) {
+	defer leaktest.Check(t)()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer lis.Close() // nolint: errcheck
+
+	addr := lis.Addr().String()
+	opts := testOptions()
+	gracefulClose := &atomic.Bool{}
+	gracefulClose.Store(true)
+	opts = opts.SetGracefulClose(gracefulClose)
+	opts = opts.SetCloseCheckInterval(50 * time.Millisecond)
+
+	scope := tally.NewTestScope("", nil)
+	metrics := newMessageWriterMetrics(scope, instrument.TimerOptions{}, true)
+
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	wg.Add(1)
+	go func() {
+		testConsumeAndAckOnConnectionListener(t, lis, opts.EncoderOptions(), opts.DecoderOptions())
+		wg.Done()
+	}()
+
+	w := newMessageWriter(200, newMessagePool(), opts, metrics)
+	w.Init()
+
+	a := newAckRouter(1)
+	a.Register(200, w)
+
+	cw := newConsumerWriter(addr, a, opts, testConsumerWriterMetrics())
+	cw.Init()
+	defer cw.Close()
+
+	w.AddConsumerWriter(cw)
+
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	// Write a message that will be sent and acked normally
+	mm := producer.NewMockMessage(ctrl)
+	mm.EXPECT().Bytes().Return([]byte("test"))
+	mm.EXPECT().Size().Return(4)
+	mm.EXPECT().Finalize(producer.Consumed) // Message will be finalized when acked
+	rm := producer.NewRefCountedMessage(mm, nil)
+	w.Write(rm)
+
+	closeDone := make(chan struct{})
+	go func() {
+		w.Close()
+		close(closeDone)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+
+	w.RLock()
+	isClosedValue := w.isClosed
+	w.RUnlock()
+
+	// With graceful close, isClosed should still be false because we're waiting
+	require.False(t, isClosedValue)
+
+	select {
+	case <-closeDone:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("Close() did not complete after message was acked")
+	}
+
+	snapshot := scope.Snapshot()
+	counters := snapshot.Counters()
+	require.Equal(t, int64(0), counters["message-closed+"].Value())
+	require.Equal(t, int64(1), counters["message-acked+"].Value())
+}
+
+// TestMessageWriterGracefulCloseDynamicDisable tests that the graceful close
+// setting can be changed dynamically and affects subsequent Close() calls.
+func TestMessageWriterGracefulCloseDynamicDisable(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	opts := testOptions()
+	gracefulClose := &atomic.Bool{}
+	gracefulClose.Store(true)
+	opts = opts.SetGracefulClose(gracefulClose)
+	opts = opts.SetCloseCheckInterval(50 * time.Millisecond)
+	opts = opts.SetMessageQueueNewWritesScanInterval(1 * time.Millisecond)
+
+	scope := tally.NewTestScope("", nil)
+	metrics := newMessageWriterMetrics(scope, instrument.TimerOptions{}, true)
+
+	w := newMessageWriter(200, newMessagePool(), opts, metrics)
+	w.Init()
+
+	// Write a message - it won't be sent since there's no consumer
+	mm1 := producer.NewMockMessage(ctrl)
+	mm1.EXPECT().Bytes().Return([]byte("test1"))
+	mm1.EXPECT().Size().Return(5)
+	mm1.EXPECT().Finalize(producer.Consumed).AnyTimes()
+	rm1 := producer.NewRefCountedMessage(mm1, nil)
+	w.Write(rm1)
+
+	require.Equal(t, 1, w.QueueSize(), "message should be in queue")
+
+	// Start close - it will wait because graceful=true and no consumer
+	closeDone := make(chan struct{})
+	go func() {
+		w.Close()
+		close(closeDone)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+
+	// Verify isClosed is false (graceful close is waiting)
+	w.RLock()
+	isClosedWithGraceful := w.isClosed
+	w.RUnlock()
+	require.False(t, isClosedWithGraceful)
+
+	// Verify no auto-acking happened yet (graceful close prevents it)
+	snapshot := scope.Snapshot()
+	counters := snapshot.Counters()
+	require.Equal(t, int64(0), counters["message-closed+"].Value())
+
+	// Disable graceful close
+	gracefulClose.Store(false)
+
+	select {
+	case <-closeDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Close() did not complete after disabling graceful close")
+	}
+
+	w.RLock()
+	isClosedAfter := w.isClosed
+	w.RUnlock()
+	require.True(t, isClosedAfter, "isClosed should be true after Close() completes")
+
+	// Verify metrics: The message may or may not be auto-acked depending on timing. There's a race between:
+	// 1. Close() setting isClosed=true (enables auto-ack)
+	// 2. Close() closing doneCh (stops scan goroutine)
+	snapshot = scope.Snapshot()
+	counters = snapshot.Counters()
+	messageClosedCount := counters["message-closed+"].Value()
+	require.True(t, messageClosedCount == 0 || messageClosedCount == 1)
 }

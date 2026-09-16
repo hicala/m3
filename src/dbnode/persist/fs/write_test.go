@@ -26,9 +26,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/persist"
 	"github.com/m3db/m3/src/x/ident"
-	"github.com/stretchr/testify/require"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 // TestWriteReuseAfterError was added as a regression test after it was
@@ -48,7 +50,7 @@ func TestWriteReuseAfterError(t *testing.T) {
 		Identifier: FileSetFileIdentifier{
 			Namespace:   testNs1ID,
 			Shard:       0,
-			BlockStart:  time.Now().Truncate(time.Hour),
+			BlockStart:  xtime.Now().Truncate(time.Hour),
 			VolumeIndex: 0,
 		},
 		BlockSize:   time.Hour,

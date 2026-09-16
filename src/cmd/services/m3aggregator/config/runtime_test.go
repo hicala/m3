@@ -24,6 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+	yaml "gopkg.in/yaml.v2"
+
 	"github.com/m3db/m3/src/aggregator/aggregator"
 	"github.com/m3db/m3/src/aggregator/runtime"
 	"github.com/m3db/m3/src/cluster/client"
@@ -31,10 +35,6 @@ import (
 	"github.com/m3db/m3/src/cluster/kv/mem"
 	"github.com/m3db/m3/src/cluster/placement"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
-	yaml "gopkg.in/yaml.v2"
 )
 
 func TestRuntimeOptionsConfigurationNewRuntimeOptionsManager(t *testing.T) {
@@ -76,7 +76,7 @@ writeNewMetricNoLimitWarmupDuration: 10m
 	testShards := []uint32{0, 1, 2, 3}
 	testPlacement := placement.NewPlacement().SetReplicaFactor(2).SetShards(testShards)
 	testPlacementManager := aggregator.NewMockPlacementManager(ctrl)
-	testPlacementManager.EXPECT().Placement().Return(nil, testPlacement, nil).AnyTimes()
+	testPlacementManager.EXPECT().Placement().Return(testPlacement, nil).AnyTimes()
 
 	mockClient := client.NewMockClient(ctrl)
 	mockClient.EXPECT().Store(gomock.Any()).Return(memStore, nil)

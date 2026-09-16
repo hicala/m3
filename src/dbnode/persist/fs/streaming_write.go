@@ -27,11 +27,12 @@ import (
 	"math"
 	"time"
 
+	"github.com/m3db/bloom/v4"
+
 	"github.com/m3db/m3/src/dbnode/persist"
 	"github.com/m3db/m3/src/dbnode/ts"
 	"github.com/m3db/m3/src/x/ident"
-
-	"github.com/m3db/bloom/v4"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 // StreamingWriter writes into data fileset without intermediate buffering.
@@ -52,11 +53,14 @@ type StreamingWriter interface {
 
 // StreamingWriterOpenOptions in the options for the StreamingWriter.
 type StreamingWriterOpenOptions struct {
-	NamespaceID         ident.ID
-	ShardID             uint32
-	BlockStart          time.Time
-	BlockSize           time.Duration
-	VolumeIndex         int
+	NamespaceID ident.ID
+	ShardID     uint32
+	BlockStart  xtime.UnixNano
+	BlockSize   time.Duration
+	VolumeIndex int
+
+	// PlannedRecordsCount is an estimate of the number of series to be written.
+	// Must be greater than 0.
 	PlannedRecordsCount uint
 }
 
@@ -83,6 +87,11 @@ func NewStreamingWriter(opts Options) (StreamingWriter, error) {
 }
 
 func (w *streamingWriter) Open(opts StreamingWriterOpenOptions) error {
+	if opts.PlannedRecordsCount <= 0 {
+		return fmt.Errorf(
+			"PlannedRecordsCount must be positive, got %d", opts.PlannedRecordsCount)
+	}
+
 	writerOpts := DataWriterOpenOptions{
 		BlockSize: opts.BlockSize,
 		Identifier: FileSetFileIdentifier{
@@ -105,17 +114,21 @@ func (w *streamingWriter) Open(opts StreamingWriterOpenOptions) error {
 	w.bloomFilter = bloom.NewBloomFilter(m, k)
 
 	summariesApprox := float64(opts.PlannedRecordsCount) * w.options.IndexSummariesPercent()
-	w.summaryEvery = 0
+	w.summaryEvery = 1
 	if summariesApprox > 0 {
-		w.summaryEvery = int64(math.Floor(float64(opts.PlannedRecordsCount) / summariesApprox))
+		w.summaryEvery = int64(math.Max(1,
+			math.Floor(float64(opts.PlannedRecordsCount)/summariesApprox)))
 	}
 
 	if err := w.writer.Open(writerOpts); err != nil {
 		return err
 	}
+
+	w.currIdx = 0
 	w.indexOffset = 0
 	w.summaries = 0
 	w.prevIDBytes = nil
+
 	return nil
 }
 
@@ -182,7 +195,8 @@ func (w *streamingWriter) writeIndexRelated(
 	// time window
 	w.bloomFilter.Add(id)
 
-	if entry.index%w.summaryEvery == 0 {
+	writeSummary := w.summaryEvery == 0 || entry.index%w.summaryEvery == 0
+	if writeSummary {
 		// Capture the offset for when we write this summary back, only capture
 		// for every summary we'll actually write to avoid a few memcopies
 		entry.indexFileOffset = w.indexOffset
@@ -194,7 +208,7 @@ func (w *streamingWriter) writeIndexRelated(
 	}
 	w.indexOffset += length
 
-	if entry.index%w.summaryEvery == 0 {
+	if writeSummary {
 		err = w.writer.writeSummariesEntry(id, entry)
 		if err != nil {
 			return err

@@ -23,9 +23,9 @@ package query
 import (
 	"testing"
 
-	"github.com/m3db/m3/src/m3ninx/search"
-
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/m3ninx/search"
 )
 
 func TestDisjunctionQuery(t *testing.T) {
@@ -102,7 +102,7 @@ func TestDisjunctionQueryEqual(t *testing.T) {
 				NewTermQuery([]byte("fruit"), []byte("banana")),
 				NewTermQuery([]byte("fruit"), []byte("apple")),
 			}),
-			expected: false,
+			expected: true,
 		},
 	}
 

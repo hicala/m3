@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2016 Uber Technologies, Inc.
@@ -26,13 +27,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/sharding"
-
-	"github.com/stretchr/testify/require"
 )
 
-func TestDiskCleansupInactiveDirectories(t *testing.T) {
+func TestDiskCleanupInactiveDirectories(t *testing.T) {
 	var resetSetup TestSetup
 	if testing.Short() {
 		t.SkipNow() // Just skip if we're doing a short run

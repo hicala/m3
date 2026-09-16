@@ -25,14 +25,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/uber-go/tally"
+
 	"github.com/m3db/m3/src/metrics/encoding/protobuf"
 	"github.com/m3db/m3/src/metrics/metric"
 	"github.com/m3db/m3/src/metrics/metric/unaggregated"
-
-	"github.com/uber-go/tally"
 )
-
-const ()
 
 var (
 	testLargerBatchTimer = unaggregated.MetricUnion{
@@ -49,7 +47,7 @@ func BenchmarkParallelWriter(b *testing.B) {
 		log:             opts.InstrumentOptions().Logger(),
 		metrics:         newWriterMetrics(tally.NoopScope),
 		encoderOpts:     opts.EncoderOptions(),
-		flushSize:       opts.FlushSize(),
+		maxBatchSize:    opts.MaxBatchSize(),
 		queue:           testNoOpQueue{},
 		encodersByShard: make(map[uint32]*lockedEncoder),
 	}
@@ -68,7 +66,7 @@ func BenchmarkParallelWriter(b *testing.B) {
 					metadatas: testStagedMetadatas,
 				},
 			}
-			if err := writer.Write(uint32(shard), payload); err != nil {
+			if _, err := writer.Write(uint32(shard), payload); err != nil {
 				b.Fatalf("failed to successfully write metric: %v", err)
 			}
 		}
@@ -82,7 +80,7 @@ func BenchmarkSerialOneShardWriter(b *testing.B) {
 		log:             opts.InstrumentOptions().Logger(),
 		metrics:         newWriterMetrics(tally.NoopScope),
 		encoderOpts:     opts.EncoderOptions(),
-		flushSize:       opts.FlushSize(),
+		maxBatchSize:    opts.MaxBatchSize(),
 		queue:           testNoOpQueue{},
 		encodersByShard: make(map[uint32]*lockedEncoder),
 	}
@@ -101,7 +99,7 @@ func BenchmarkSerialOneShardWriter(b *testing.B) {
 					metadatas: testStagedMetadatas,
 				},
 			}
-			if err := writer.Write(uint32(shard), payload); err != nil {
+			if _, err := writer.Write(uint32(shard), payload); err != nil {
 				b.Fatalf("failed to successfully write metric: %v", err)
 			}
 		}
@@ -116,7 +114,7 @@ func BenchmarkSerialWriter(b *testing.B) {
 		log:             opts.InstrumentOptions().Logger(),
 		metrics:         newWriterMetrics(tally.NoopScope),
 		encoderOpts:     opts.EncoderOptions(),
-		flushSize:       opts.FlushSize(),
+		maxBatchSize:    opts.MaxBatchSize(),
 		queue:           testNoOpQueue{},
 		encodersByShard: make(map[uint32]*lockedEncoder),
 	}
@@ -139,7 +137,7 @@ func BenchmarkSerialWriter(b *testing.B) {
 					metadatas: testStagedMetadatas,
 				},
 			}
-			if err := writer.Write(uint32(shard), payload); err != nil {
+			if _, err := writer.Write(uint32(shard), payload); err != nil {
 				b.Fatalf("failed to successfully write metric: %v", err)
 			}
 		}
@@ -150,6 +148,8 @@ type testNoOpQueue struct{}
 
 func (q testNoOpQueue) Enqueue(protobuf.Buffer) error { return nil }
 func (q testNoOpQueue) Close() error                  { return nil }
+func (q testNoOpQueue) Size() int                     { return 0 }
+func (q testNoOpQueue) Flush()                        {}
 
 type testSerialWriter struct {
 	*writer
@@ -160,6 +160,6 @@ type testSerialWriter struct {
 func (mw *testSerialWriter) Write(
 	_ uint32,
 	payload payloadUnion,
-) error {
+) (int, error) {
 	return mw.encodeWithLock(mw.encoder, payload)
 }

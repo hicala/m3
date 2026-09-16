@@ -24,22 +24,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/query/executor/transform"
 	"github.com/m3db/m3/src/query/models"
 	"github.com/m3db/m3/src/query/parser"
 	"github.com/m3db/m3/src/query/test"
 	"github.com/m3db/m3/src/query/test/executor"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestTimestamp(t *testing.T) {
 	values, bounds := test.GenerateValuesAndBounds(nil, nil)
 	block := test.NewBlockFromValues(bounds, values)
-	c, sink := executor.NewControllerWithSink(parser.NodeID(1))
+	c, sink := executor.NewControllerWithSink(parser.NodeID(rune(1)))
 	node := newTimestampOp(TimestampType).Node(c, transform.Options{})
-	err := node.Process(models.NoopQueryContext(), parser.NodeID(0), block)
+	err := node.Process(models.NoopQueryContext(), parser.NodeID(rune(0)), block)
 	require.NoError(t, err)
 	assert.Len(t, sink.Values, 2)
 
@@ -47,7 +47,7 @@ func TestTimestamp(t *testing.T) {
 	step := bounds.StepSize
 	for _, vals := range sink.Values {
 		for i, val := range vals {
-			expected := float64(start.Add(time.Duration(i) * step).Unix())
+			expected := float64(start.Add(time.Duration(i) * step).Seconds())
 			diff := expected - val
 			assert.True(t, diff < 1)
 		}

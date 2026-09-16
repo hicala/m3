@@ -26,20 +26,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/query/block"
 	"github.com/m3db/m3/src/query/executor/transform"
 	"github.com/m3db/m3/src/query/models"
 	"github.com/m3db/m3/src/query/parser"
 	"github.com/m3db/m3/src/query/test"
+	"github.com/m3db/m3/src/query/test/compare"
 	"github.com/m3db/m3/src/query/test/executor"
 	"github.com/m3db/m3/src/query/test/transformtest"
 	"github.com/m3db/m3/src/query/ts"
 	xtest "github.com/m3db/m3/src/x/test"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 var nan = math.NaN()
@@ -121,7 +122,7 @@ func testTemporalFunc(t *testing.T, opGen opGenerator, tests []testCase) {
 					StepSize: bounds.StepSize,
 				}, seriesMetas, resultMeta, values, runBatched)
 
-				c, sink := executor.NewControllerWithSink(parser.NodeID(1))
+				c, sink := executor.NewControllerWithSink(parser.NodeID(rune(1)))
 				baseOp := opGen(t, tt)
 				node := baseOp.Node(c, transformtest.Options(t, transform.OptionsParams{
 					TimeSpec: transform.TimeSpec{
@@ -131,12 +132,12 @@ func testTemporalFunc(t *testing.T, opGen opGenerator, tests []testCase) {
 					},
 				}))
 
-				err := node.Process(models.NoopQueryContext(), parser.NodeID(0), bl)
+				err := node.Process(models.NoopQueryContext(), parser.NodeID(rune(0)), bl)
 				require.NoError(t, err)
 
-				test.EqualsWithNansWithDelta(t, tt.expected, sink.Values, 0.0001)
+				compare.EqualsWithNansWithDelta(t, tt.expected, sink.Values, 0.0001)
 				metaOne := block.SeriesMeta{
-					Name: []byte("t1=v1,"),
+					Name: []byte("{t1=\"v1\"}"),
 					Tags: models.EmptyTags().AddTags([]models.Tag{{
 						Name:  []byte("t1"),
 						Value: []byte("v1"),
@@ -144,15 +145,23 @@ func testTemporalFunc(t *testing.T, opGen opGenerator, tests []testCase) {
 				}
 
 				metaTwo := block.SeriesMeta{
-					Name: []byte("t1=v2,"),
+					Name: []byte("{t1=\"v2\"}"),
 					Tags: models.EmptyTags().AddTags([]models.Tag{{
 						Name:  []byte("t1"),
 						Value: []byte("v2"),
 					}})}
 
-				// NB: name should be dropped from series tags, and the name
-				// should be the updated ID.
-				expectedSeriesMetas := []block.SeriesMeta{metaOne, metaTwo}
+				// The last_over_time function acts like offset;
+				// thus, it should keep the metric name.
+				// For all other functions,
+				// name should be dropped from series tags,
+				// and the name should be the updated ID.
+				var expectedSeriesMetas []block.SeriesMeta
+				if tt.opType != LastType {
+					expectedSeriesMetas = []block.SeriesMeta{metaOne, metaTwo}
+				} else {
+					expectedSeriesMetas = seriesMetas
+				}
 				require.Equal(t, expectedSeriesMetas, sink.Metas)
 			})
 		}
@@ -161,7 +170,7 @@ func testTemporalFunc(t *testing.T, opGen opGenerator, tests []testCase) {
 
 func TestGetIndicesError(t *testing.T) {
 	size := 10
-	now := time.Now().Truncate(time.Minute)
+	now := xtime.Now().Truncate(time.Minute)
 	dps := make([]ts.Datapoint, size)
 	s := int64(time.Second)
 	for i := range dps {
@@ -181,7 +190,7 @@ func TestGetIndicesError(t *testing.T) {
 	require.Equal(t, -1, r)
 	require.False(t, ok)
 
-	pastBound := xtime.ToUnixNano(now.Add(time.Hour))
+	pastBound := now.Add(time.Hour)
 	l, r, ok = getIndices(dps, pastBound, pastBound+10, 0)
 	require.Equal(t, 0, l)
 	require.Equal(t, 10, r)
@@ -239,7 +248,7 @@ func testParallelProcess(t *testing.T, warning bool) {
 	defer ctrl.Finish()
 
 	tagName := "tag"
-	c, sink := executor.NewControllerWithSink(parser.NodeID(1))
+	c, sink := executor.NewControllerWithSink(parser.NodeID(rune(1)))
 	aggProcess := aggProcessor{
 		aggFunc: func(fs []float64) float64 {
 			require.Equal(t, 1, len(fs))
@@ -323,7 +332,7 @@ func testParallelProcess(t *testing.T, warning bool) {
 	bl.EXPECT().MultiSeriesIter(gomock.Any()).Return(batches, nil).MaxTimes(1)
 	bl.EXPECT().Close().Times(1)
 
-	err := node.Process(models.NoopQueryContext(), parser.NodeID(0), bl)
+	err := node.Process(models.NoopQueryContext(), parser.NodeID(rune(0)), bl)
 	require.NoError(t, err)
 
 	expected := []float64{
@@ -338,7 +347,7 @@ func testParallelProcess(t *testing.T, warning bool) {
 
 	for i, m := range sink.Metas {
 		expected := fmt.Sprint(expected[i])
-		expectedName := fmt.Sprintf("tag=%s,", expected)
+		expectedName := fmt.Sprintf("{tag=\"%s\"}", expected)
 		assert.Equal(t, expectedName, string(m.Name))
 		require.Equal(t, 1, m.Tags.Len())
 		tag, found := m.Tags.Get([]byte(tagName))

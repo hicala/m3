@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2018 Uber Technologies, Inc.
@@ -26,11 +27,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestDiskCleanup(t *testing.T) {
@@ -51,7 +52,7 @@ func TestDiskCleanup(t *testing.T) {
 	var (
 		shard         = uint32(0)
 		numTimes      = 10
-		fileTimes     = make([]time.Time, numTimes)
+		fileTimes     = make([]xtime.UnixNano, numTimes)
 		now           = testSetup.NowFn()()
 		commitLogOpts = testSetup.StorageOpts().CommitLogOptions().
 				SetFlushInterval(defaultIntegrationTestFlushInterval)
@@ -63,9 +64,7 @@ func TestDiskCleanup(t *testing.T) {
 	}
 	writeDataFileSetFiles(t, testSetup.StorageOpts(), md, shard, fileTimes)
 	for _, clTime := range fileTimes {
-		data := map[xtime.UnixNano]generate.SeriesBlock{
-			xtime.ToUnixNano(clTime): nil,
-		}
+		data := map[xtime.UnixNano]generate.SeriesBlock{clTime: nil}
 		writeCommitLogDataSpecifiedTS(
 			t, testSetup, commitLogOpts,
 			data, ns1, clTime, false)

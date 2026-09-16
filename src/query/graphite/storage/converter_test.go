@@ -23,11 +23,11 @@ package storage
 import (
 	"testing"
 
-	"github.com/m3db/m3/src/query/graphite/graphite"
-	"github.com/m3db/m3/src/query/models"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/query/graphite/graphite"
+	"github.com/m3db/m3/src/query/models"
 )
 
 func TestConvertMetricPartToMatcher(t *testing.T) {
@@ -51,6 +51,13 @@ func TestConvertWildcardToMatcher(t *testing.T) {
 		expected := models.Matcher{
 			Type: models.MatchField,
 			Name: graphite.TagName(i),
+		}
+		if i == 0 {
+			expected = models.Matcher{
+				Type:  models.MatchRegexp,
+				Name:  graphite.TagName(0),
+				Value: []byte(".*"),
+			}
 		}
 
 		actual, err := convertMetricPartToMatcher(i, metric)

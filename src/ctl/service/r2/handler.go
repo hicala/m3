@@ -24,9 +24,10 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/m3db/m3/src/ctl/auth"
-
 	"go.uber.org/zap"
+
+	"github.com/m3db/m3/src/ctl/auth"
+	xhttp "github.com/m3db/m3/src/x/net/http"
 )
 
 type r2HandlerFunc func(http.ResponseWriter, *http.Request) error
@@ -68,6 +69,6 @@ func (h r2Handler) handleError(w http.ResponseWriter, opError error) {
 	if err != nil {
 		msg := fmt.Sprintf("Could not generate error response for: %s", opError.Error())
 		h.logger.Error(msg)
-		http.Error(w, msg, http.StatusInternalServerError)
+		xhttp.WriteError(w, err)
 	}
 }

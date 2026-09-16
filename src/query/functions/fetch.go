@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/query/block"
 	"github.com/m3db/m3/src/query/executor/transform"
 	"github.com/m3db/m3/src/query/models"
@@ -32,8 +34,6 @@ import (
 	"github.com/m3db/m3/src/query/util/logging"
 	"github.com/m3db/m3/src/x/instrument"
 	"github.com/m3db/m3/src/x/opentracing"
-
-	"go.uber.org/zap"
 )
 
 // FetchType gets the series from storage
@@ -116,8 +116,8 @@ func (n *FetchNode) fetch(queryCtx *models.QueryContext) (block.Result, error) {
 
 	offset := n.op.Offset
 	return n.storage.FetchBlocks(ctx, &storage.FetchQuery{
-		Start:       startTime.Add(-1 * offset),
-		End:         endTime.Add(-1 * offset),
+		Start:       startTime.Add(-1 * offset).ToTime(),
+		End:         endTime.Add(-1 * offset).ToTime(),
 		TagMatchers: n.op.Matchers,
 		Interval:    timeSpec.Step,
 	}, opts)

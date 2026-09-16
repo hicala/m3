@@ -28,32 +28,37 @@ import (
 
 	"github.com/m3db/m3/src/cluster/generated/proto/placementpb"
 	"github.com/m3db/m3/src/cluster/shard"
+	xerrors "github.com/m3db/m3/src/x/errors"
 )
 
 const (
 	// uninitializedShardSetID represents uninitialized shard set id.
 	uninitializedShardSetID = 0
+	// uninitializedSubClusterID represents uninitialized subcluster id.
+	uninitializedSubClusterID = uint32(0)
 )
 
 var (
-	errNilPlacementProto          = errors.New("nil placement proto")
-	errNilPlacementSnapshotsProto = errors.New("nil placement snapshots proto")
-	errNilPlacementInstanceProto  = errors.New("nil placement instance proto")
-	errDuplicatedShards           = errors.New("invalid placement, there are duplicated shards in one replica")
-	errUnexpectedShards           = errors.New("invalid placement, there are unexpected shard ids on instance")
-	errMirrorNotSharded           = errors.New("invalid placement, mirrored placement must be sharded")
+	errNilPlacementProto         = errors.New("nil placement proto")
+	errNilPlacementInstanceProto = errors.New("nil placement instance proto")
+	errDuplicatedShards          = errors.New("invalid placement, there are duplicated shards in one replica")
+	errUnexpectedShards          = errors.New("invalid placement, there are unexpected shard ids on instance")
+	errMirrorNotSharded          = errors.New("invalid placement, mirrored placement must be sharded")
+	errSubclusteredNotSharded    = errors.New("invalid placement, subclustered placement must be sharded")
 )
 
 type placement struct {
-	instances        map[string]Instance
-	instancesByShard map[uint32][]Instance
-	rf               int
-	shards           []uint32
-	cutoverNanos     int64
-	version          int
-	maxShardSetID    uint32
-	isSharded        bool
-	isMirrored       bool
+	instances              map[string]Instance
+	instancesByShard       map[uint32][]Instance
+	rf                     int
+	shards                 []uint32
+	cutoverNanos           int64
+	version                int
+	maxShardSetID          uint32
+	isSharded              bool
+	isMirrored             bool
+	isSubclustered         bool
+	instancesPerSubCluster int
 }
 
 // NewPlacement returns a ServicePlacement
@@ -87,7 +92,9 @@ func NewPlacementFromProto(p *placementpb.Placement) (Placement, error) {
 		SetIsSharded(p.IsSharded).
 		SetCutoverNanos(p.CutoverTime).
 		SetIsMirrored(p.IsMirrored).
-		SetMaxShardSetID(p.MaxShardSetId), nil
+		SetMaxShardSetID(p.MaxShardSetId).
+		SetIsSubclustered(p.IsSubclustered).
+		SetInstancesPerSubCluster(int(p.InstancesPerSubcluster)), nil
 }
 
 func (p *placement) InstancesForShard(shard uint32) []Instance {
@@ -157,6 +164,24 @@ func (p *placement) NumShards() int {
 	return len(p.shards)
 }
 
+func (p *placement) InstancesPerSubCluster() int {
+	return p.instancesPerSubCluster
+}
+
+func (p *placement) SetInstancesPerSubCluster(v int) Placement {
+	p.instancesPerSubCluster = v
+	return p
+}
+
+func (p *placement) IsSubclustered() bool {
+	return p.isSubclustered
+}
+
+func (p *placement) SetIsSubclustered(v bool) Placement {
+	p.isSubclustered = v
+	return p
+}
+
 func (p *placement) IsSharded() bool {
 	return p.isSharded
 }
@@ -220,13 +245,15 @@ func (p *placement) Proto() (*placementpb.Placement, error) {
 	}
 
 	return &placementpb.Placement{
-		Instances:     instances,
-		ReplicaFactor: uint32(p.ReplicaFactor()),
-		NumShards:     uint32(p.NumShards()),
-		IsSharded:     p.IsSharded(),
-		CutoverTime:   p.CutoverNanos(),
-		IsMirrored:    p.IsMirrored(),
-		MaxShardSetId: p.MaxShardSetID(),
+		Instances:              instances,
+		ReplicaFactor:          uint32(p.ReplicaFactor()),
+		NumShards:              uint32(p.NumShards()),
+		IsSharded:              p.IsSharded(),
+		CutoverTime:            p.CutoverNanos(),
+		IsMirrored:             p.IsMirrored(),
+		MaxShardSetId:          p.MaxShardSetID(),
+		IsSubclustered:         p.IsSubclustered(),
+		InstancesPerSubcluster: uint32(p.InstancesPerSubCluster()),
 	}, nil
 }
 
@@ -239,55 +266,9 @@ func (p *placement) Clone() Placement {
 		SetIsMirrored(p.IsMirrored()).
 		SetCutoverNanos(p.CutoverNanos()).
 		SetMaxShardSetID(p.MaxShardSetID()).
-		SetVersion(p.Version())
-}
-
-// Placements represents a list of placements.
-type Placements []Placement
-
-// NewPlacementsFromProto creates a list of placements from proto.
-func NewPlacementsFromProto(p *placementpb.PlacementSnapshots) (Placements, error) {
-	if p == nil {
-		return nil, errNilPlacementSnapshotsProto
-	}
-
-	placements := make([]Placement, 0, len(p.Snapshots))
-	for _, snapshot := range p.Snapshots {
-		placement, err := NewPlacementFromProto(snapshot)
-		if err != nil {
-			return nil, err
-		}
-		placements = append(placements, placement)
-	}
-	sort.Sort(placementsByCutoverAsc(placements))
-	return placements, nil
-}
-
-// Proto converts a list of Placement to a proto.
-func (placements Placements) Proto() (*placementpb.PlacementSnapshots, error) {
-	snapshots := make([]*placementpb.Placement, 0, len(placements))
-	for _, p := range placements {
-		placementProto, err := p.Proto()
-		if err != nil {
-			return nil, err
-		}
-		snapshots = append(snapshots, placementProto)
-	}
-	return &placementpb.PlacementSnapshots{
-		Snapshots: snapshots,
-	}, nil
-}
-
-// ActiveIndex finds the index of the last placement whose cutover time is no
-// later than timeNanos (a.k.a. the active placement). Assuming the cutover times
-// of the placements are sorted in ascending order (i.e., earliest time first).
-func (placements Placements) ActiveIndex(timeNanos int64) int {
-	idx := 0
-	for idx < len(placements) && placements[idx].CutoverNanos() <= timeNanos {
-		idx++
-	}
-	idx--
-	return idx
+		SetVersion(p.Version()).
+		SetIsSubclustered(p.IsSubclustered()).
+		SetInstancesPerSubCluster(p.InstancesPerSubCluster())
 }
 
 // Validate validates a placement to ensure:
@@ -297,8 +278,19 @@ func (placements Placements) ActiveIndex(timeNanos int64) int {
 // - There is one Initializing shard for each Leaving shard.
 // - The instances with same shard_set_id owns the same shards.
 func Validate(p Placement) error {
+	if err := validate(p); err != nil {
+		return xerrors.NewInvalidParamsError(err)
+	}
+	return nil
+}
+
+func validate(p Placement) error {
 	if p.IsMirrored() && !p.IsSharded() {
 		return errMirrorNotSharded
+	}
+
+	if p.IsSubclustered() && !p.IsSharded() {
+		return errSubclusteredNotSharded
 	}
 
 	shardCountMap := convertShardSliceToMap(p.Shards())
@@ -311,6 +303,7 @@ func Validate(p Placement) error {
 	totalLeaving := 0
 	totalInit := 0
 	totalInitWithSourceID := 0
+	instancesLeavingShardsWithMatchingInitShards := make(map[string]map[uint32]string)
 	maxShardSetID := p.MaxShardSetID()
 	instancesByShardSetID := make(map[uint32]Instance, p.NumInstances())
 	for _, instance := range p.Instances() {
@@ -322,6 +315,13 @@ func Validate(p Placement) error {
 		}
 		if instance.Shards().NumShards() != 0 && !p.IsSharded() {
 			return fmt.Errorf("instance %s contains shards in a non-sharded placement", instance.String())
+		}
+		if instance.SubClusterID() == uninitializedSubClusterID && p.IsSubclustered() {
+			return fmt.Errorf("instance %s has uninitialized subcluster id in a subclustered placement", instance.String())
+		}
+		if instance.SubClusterID() != uninitializedSubClusterID && !p.IsSubclustered() {
+			return fmt.Errorf("instance %s has subcluster id %d in a non-subclustered placement",
+				instance.String(), instance.SubClusterID())
 		}
 		shardSetID := instance.ShardSetID()
 		if shardSetID > maxShardSetID {
@@ -340,8 +340,52 @@ func Validate(p Placement) error {
 				totalInit++
 				shardCountMap[s.ID()] = count + 1
 				totalCapacity++
-				if s.SourceID() != "" {
+				if sourceID := s.SourceID(); sourceID != "" {
 					totalInitWithSourceID++
+
+					// Check the instance.
+					leaving, ok := p.Instance(sourceID)
+					if !ok {
+						return fmt.Errorf(
+							"instance %s has initializing shard %d with "+
+								"source ID %s but no such instance in placement",
+							instance.ID(), s.ID(), sourceID)
+					}
+
+					// Check has leaving shard.
+					leavingShard, ok := leaving.Shards().Shard(s.ID())
+					if !ok {
+						return fmt.Errorf(
+							"instance %s has initializing shard %d with "+
+								"source ID %s but leaving instance has no such shard",
+							instance.ID(), s.ID(), sourceID)
+					}
+
+					// Check the shard is leaving.
+					if state := leavingShard.State(); state != shard.Leaving {
+						return fmt.Errorf(
+							"instance %s has initializing shard %d with "+
+								"source ID %s but leaving instance has shard with state %s",
+							instance.ID(), s.ID(), sourceID, state.String())
+					}
+
+					// Make sure does not get double matched.
+					matches, ok := instancesLeavingShardsWithMatchingInitShards[sourceID]
+					if !ok {
+						matches = make(map[uint32]string)
+						instancesLeavingShardsWithMatchingInitShards[sourceID] = matches
+					}
+
+					match, ok := matches[s.ID()]
+					if ok {
+						return fmt.Errorf(
+							"instance %s has initializing shard %d with "+
+								"source ID %s but leaving instance has shard already matched by %s",
+							instance.ID(), s.ID(), sourceID, match)
+					}
+
+					// Track that it's matched.
+					matches[s.ID()] = instance.ID()
 				}
 			case shard.Leaving:
 				totalLeaving++
@@ -390,6 +434,98 @@ func Validate(p Placement) error {
 	for shard, c := range shardCountMap {
 		if p.ReplicaFactor() != c {
 			return fmt.Errorf("invalid shard count for shard %d: expected %d, actual %d", shard, p.ReplicaFactor(), c)
+		}
+	}
+
+	if p.IsSubclustered() {
+		return validateSubclusteredPlacement(p)
+	}
+	return nil
+}
+
+func validateSubclusteredPlacement(p Placement) error {
+	shardToSubclusterMap := make(map[uint32]map[uint32]struct{})
+	subClusterToInstanceMap := make(map[uint32]map[Instance]struct{})
+	shardToIsolationGroupMap := make(map[uint32]map[string]struct{})
+	instancesPerSubCluster := p.InstancesPerSubCluster()
+
+	for _, instance := range p.Instances() {
+		if instance.IsLeaving() {
+			continue
+		}
+		subclusterID := instance.SubClusterID()
+		if _, exist := subClusterToInstanceMap[subclusterID]; !exist {
+			subClusterToInstanceMap[subclusterID] = make(map[Instance]struct{})
+		}
+		subClusterToInstanceMap[subclusterID][instance] = struct{}{}
+
+		for _, s := range instance.Shards().All() {
+			if s.State() == shard.Leaving {
+				continue
+			}
+			if _, exist := shardToIsolationGroupMap[s.ID()]; !exist {
+				shardToIsolationGroupMap[s.ID()] = make(map[string]struct{})
+			}
+			shardToIsolationGroupMap[s.ID()][instance.IsolationGroup()] = struct{}{}
+			if _, exist := shardToSubclusterMap[s.ID()]; !exist {
+				shardToSubclusterMap[s.ID()] = make(map[uint32]struct{})
+			}
+			shardToSubclusterMap[s.ID()][subclusterID] = struct{}{}
+		}
+	}
+
+	partialSubclusters := 0
+
+	for subclusterID, instances := range subClusterToInstanceMap {
+		if len(instances) > instancesPerSubCluster {
+			return fmt.Errorf("invalid subcluster %d, expected at most %d instances, actual %d",
+				subclusterID, instancesPerSubCluster, len(instances))
+		}
+		if len(instances) < instancesPerSubCluster {
+			partialSubclusters++
+		}
+	}
+
+	if partialSubclusters > 1 {
+		return fmt.Errorf("invalid placement, more than one partial subcluster found: %d", partialSubclusters)
+	}
+
+	for shard, subclusters := range shardToSubclusterMap {
+		firstReplica := true
+		shardSubclusterID := uninitializedSubClusterID
+
+		// If the movement is happening then the shard can be shared by at most two subclusters.
+		// One which is giving the shard and one which is receiving the shard.
+		if len(subclusters) > 2 {
+			return fmt.Errorf("invalid shard %d, expected at most 2 subclusters (only during shard movement),"+
+				"actual %d", shard, len(subclusters))
+		}
+		if len(subclusters) == 2 {
+			// Check if the shard is shared among subclusters while moving from one subcluster to another.
+			// If the movement is happening than the shard can be shared by at most two subclusters.
+			// One which is giving the shard and one which is receiving the shard.
+			for subcluster := range subclusters {
+				if firstReplica {
+					shardSubclusterID = subcluster
+					firstReplica = false
+					continue
+				}
+				currSubclusterID := subcluster
+				shardSubclusterInstances := subClusterToInstanceMap[shardSubclusterID]
+				currSubclusterInstances := subClusterToInstanceMap[currSubclusterID]
+				if len(shardSubclusterInstances) == instancesPerSubCluster &&
+					len(currSubclusterInstances) == instancesPerSubCluster {
+					return fmt.Errorf("invalid shard %d, expected subcluster id %d, actual %d",
+						shard, shardSubclusterID, currSubclusterID)
+				}
+				// Note: The case where both subclusters are partial is already caught by
+				// the "more than one partial subcluster".
+			}
+		}
+
+		if len(shardToIsolationGroupMap[shard]) != p.ReplicaFactor() {
+			return fmt.Errorf("invalid shard %d, expected %d isolation groups, actual %d",
+				shard, p.ReplicaFactor(), len(shardToIsolationGroupMap[shard]))
 		}
 	}
 	return nil
@@ -446,7 +582,8 @@ func NewInstanceFromProto(instance *placementpb.Instance) (Instance, error) {
 		SetPort(instance.Port).
 		SetMetadata(InstanceMetadata{
 			DebugPort: debugPort,
-		}), nil
+		}).
+		SetSubClusterID(instance.SubclusterId), nil
 }
 
 type instance struct {
@@ -460,6 +597,7 @@ type instance struct {
 	weight         uint32
 	shardSetID     uint32
 	metadata       InstanceMetadata
+	subClusterID   uint32
 }
 
 func (i *instance) String() string {
@@ -475,6 +613,15 @@ func (i *instance) ID() string {
 
 func (i *instance) SetID(id string) Instance {
 	i.id = id
+	return i
+}
+
+func (i *instance) SubClusterID() uint32 {
+	return i.subClusterID
+}
+
+func (i *instance) SetSubClusterID(value uint32) Instance {
+	i.subClusterID = value
 	return i
 }
 
@@ -578,6 +725,7 @@ func (i *instance) Proto() (*placementpb.Instance, error) {
 		Metadata: &placementpb.InstanceMetadata{
 			DebugPort: i.Metadata().DebugPort,
 		},
+		SubclusterId: i.SubClusterID(),
 	}, nil
 }
 
@@ -613,7 +761,8 @@ func (i *instance) Clone() Instance {
 		SetPort(i.Port()).
 		SetShardSetID(i.ShardSetID()).
 		SetShards(i.Shards().Clone()).
-		SetMetadata(i.Metadata())
+		SetMetadata(i.Metadata()).
+		SetSubClusterID(i.SubClusterID())
 }
 
 // Instances is a slice of instances that can produce a debug string.
@@ -656,4 +805,21 @@ func (s ByIDAscending) Less(i, j int) bool {
 
 func (s ByIDAscending) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
+}
+
+// BySubClusterIDThenInstanceID is a type that implements sort.Interface for a slice of placement.Instance
+// It sorts instances first by subcluster ID, then by instance ID within each subcluster
+type BySubClusterIDThenInstanceID []Instance
+
+func (a BySubClusterIDThenInstanceID) Len() int { return len(a) }
+
+func (a BySubClusterIDThenInstanceID) Less(i, j int) bool {
+	if a[i].SubClusterID() == a[j].SubClusterID() {
+		return a[i].ID() < a[j].ID()
+	}
+	return a[i].SubClusterID() < a[j].SubClusterID()
+}
+
+func (a BySubClusterIDThenInstanceID) Swap(i, j int) {
+	a[i], a[j] = a[j], a[i]
 }

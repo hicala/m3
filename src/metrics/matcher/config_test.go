@@ -24,14 +24,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/cluster/client"
 	"github.com/m3db/m3/src/cluster/kv"
 	"github.com/m3db/m3/src/cluster/kv/mem"
 	"github.com/m3db/m3/src/x/clock"
 	"github.com/m3db/m3/src/x/instrument"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
 )
 
 func TestConfigurationNewNamespaces(t *testing.T) {
@@ -59,6 +59,4 @@ func TestConfigurationNewNamespaces(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, cfg.InitWatchTimeout, opts.InitWatchTimeout())
 	require.Equal(t, cfg.NamespacesKey, opts.NamespacesKey())
-	require.Equal(t, []byte(cfg.NamespaceTag), opts.NamespaceTag())
-	require.Equal(t, []byte(cfg.DefaultNamespace), opts.DefaultNamespace())
 }

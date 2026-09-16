@@ -23,6 +23,9 @@ package migrator
 import (
 	"testing"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
 	"github.com/m3db/m3/src/dbnode/persist/fs/migration"
@@ -32,9 +35,6 @@ import (
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/ident"
 	"github.com/m3db/m3/src/x/instrument"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
 )
 
 func TestMigratorRun(t *testing.T) {
@@ -72,7 +72,7 @@ func TestMigratorRun(t *testing.T) {
 	migrator, err := NewMigrator(opts)
 	require.NoError(t, err)
 
-	err = migrator.Run(context.NewContext())
+	err = migrator.Run(context.NewBackground())
 	require.NoError(t, err)
 
 	// Ensure every info file has a volume index of one.

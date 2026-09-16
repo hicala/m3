@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2016 Uber Technologies, Inc.
@@ -26,13 +27,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/retention"
 	xtest "github.com/m3db/m3/src/x/test"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestPeersBootstrapMergePeerBlocks(t *testing.T) {
@@ -69,12 +70,15 @@ func testPeersBootstrapMergePeerBlocks(t *testing.T, setTestOpts setTestOptions,
 		opts = setTestOpts(t, opts)
 		namesp = opts.Namespaces()[0]
 	}
-	setupOpts := []bootstrappableTestSetupOptions{
-		{disablePeersBootstrapper: true},
-		{disablePeersBootstrapper: true},
-		{disablePeersBootstrapper: false},
+	setupOpts := []BootstrappableTestSetupOptions{
+		{DisablePeersBootstrapper: true},
+		{DisablePeersBootstrapper: true},
+		{
+			DisableCommitLogBootstrapper: true,
+			DisablePeersBootstrapper:     false,
+		},
 	}
-	setups, closeFn := newDefaultBootstrappableTestSetups(t, opts, setupOpts)
+	setups, closeFn := NewDefaultBootstrappableTestSetups(t, opts, setupOpts)
 	defer closeFn()
 
 	// Write test data alternating missing data for left/right nodes

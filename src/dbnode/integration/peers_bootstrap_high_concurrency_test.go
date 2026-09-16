@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2016 Uber Technologies, Inc.
@@ -27,16 +28,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/retention"
 	"github.com/m3db/m3/src/dbnode/storage/index"
 	"github.com/m3db/m3/src/m3ninx/idx"
+	idxpersist "github.com/m3db/m3/src/m3ninx/persist"
 	"github.com/m3db/m3/src/x/ident"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 func TestPeersBootstrapHighConcurrencyBatch16Workers64(t *testing.T) {
@@ -102,17 +105,18 @@ func testPeersBootstrapHighConcurrency(
 
 	batchSize := 16
 	concurrency := 64
-	setupOpts := []bootstrappableTestSetupOptions{
+	setupOpts := []BootstrappableTestSetupOptions{
 		{
-			disablePeersBootstrapper: true,
+			DisablePeersBootstrapper: true,
 		},
 		{
-			disablePeersBootstrapper:   false,
-			bootstrapBlocksBatchSize:   batchSize,
-			bootstrapBlocksConcurrency: concurrency,
+			DisableCommitLogBootstrapper: true,
+			DisablePeersBootstrapper:     false,
+			BootstrapBlocksBatchSize:     batchSize,
+			BootstrapBlocksConcurrency:   concurrency,
 		},
 	}
-	setups, closeFn := newDefaultBootstrappableTestSetups(t, opts, setupOpts)
+	setups, closeFn := NewDefaultBootstrappableTestSetups(t, opts, setupOpts)
 	defer closeFn()
 
 	// Write test data for first node
@@ -128,7 +132,7 @@ func testPeersBootstrapHighConcurrency(
 		},
 	}
 	numPoints := 10
-	seriesMaps := generate.BlocksByStart(blockConfigs(
+	blockConfigs := blockConfigs(
 		generateTaggedBlockConfigs(generateTaggedBlockConfig{
 			series:     numSeries,
 			numPoints:  numPoints,
@@ -153,9 +157,22 @@ func testPeersBootstrapHighConcurrency(
 			commonTags: commonTags,
 			blockStart: now,
 		}),
-	))
+	)
+	seriesMaps := generate.BlocksByStart(blockConfigs)
 	err = writeTestDataToDisk(namesp, setups[0], seriesMaps, 0)
 	require.NoError(t, err)
+
+	for blockStart, series := range seriesMaps {
+		docs := generate.ToDocMetadata(series)
+		require.NoError(t, writeTestIndexDataToDisk(
+			namesp,
+			setups[0].StorageOpts(),
+			idxpersist.DefaultIndexVolumeType,
+			blockStart,
+			setups[0].ShardSet().AllIDs(),
+			docs,
+		))
+	}
 
 	// Start the first server with filesystem bootstrapper
 	require.NoError(t, setups[0].StartServer())
@@ -188,8 +205,8 @@ func testPeersBootstrapHighConcurrency(
 
 	// Match on common tags
 	termQuery := idx.NewTermQuery(commonTags[0].Name.Bytes(), commonTags[0].Value.Bytes())
-	iter, _, err := session.FetchTaggedIDs(namesp.ID(),
-		index.Query{Query: termQuery}, queryOpts)
+	iter, _, err := session.FetchTaggedIDs(ContextWithDefaultTimeout(),
+		namesp.ID(), index.Query{Query: termQuery}, queryOpts)
 	require.NoError(t, err)
 	defer iter.Finalize()
 
@@ -204,7 +221,7 @@ type generateTaggedBlockConfig struct {
 	series     int
 	numPoints  int
 	commonTags []ident.Tag
-	blockStart time.Time
+	blockStart xtime.UnixNano
 }
 
 func generateTaggedBlockConfigs(

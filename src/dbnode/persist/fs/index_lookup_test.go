@@ -29,24 +29,24 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/digest"
 	"github.com/m3db/m3/src/dbnode/persist/fs/msgpack"
 	"github.com/m3db/m3/src/dbnode/persist/schema"
 	"github.com/m3db/m3/src/x/ident"
 	"github.com/m3db/m3/src/x/mmap"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestNewNearestIndexOffsetDetectsUnsortedFiles(t *testing.T) {
 	// Create a slice of out-of-order index summary entries
 	outOfOrderSummaries := []schema.IndexSummary{
-		schema.IndexSummary{
+		{
 			Index:            0,
 			ID:               []byte("1"),
 			IndexEntryOffset: 0,
 		},
-		schema.IndexSummary{
+		{
 			Index:            1,
 			ID:               []byte("0"),
 			IndexEntryOffset: 10,
@@ -101,12 +101,12 @@ func TestCloneCannotBeCloned(t *testing.T) {
 
 func TestClosingCloneDoesNotAffectParent(t *testing.T) {
 	indexSummaries := []schema.IndexSummary{
-		schema.IndexSummary{
+		{
 			Index:            0,
 			ID:               []byte("0"),
 			IndexEntryOffset: 0,
 		},
-		schema.IndexSummary{
+		{
 			Index:            1,
 			ID:               []byte("1"),
 			IndexEntryOffset: 10,

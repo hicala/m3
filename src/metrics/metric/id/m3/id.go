@@ -79,19 +79,9 @@ func NewRollupID(name []byte, tagPairs []id.TagPair) []byte {
 }
 
 // IsRollupID determines whether an id is a rollup id.
-// Caller may optionally pass in a sorted tag iterator
-// pool for efficiency reasons.
 // nolint: unparam
-func IsRollupID(name []byte, tags []byte, iterPool id.SortedTagIteratorPool) bool {
-	var iter id.SortedTagIterator
-	if iterPool == nil {
-		iter = NewSortedTagIterator(tags)
-	} else {
-		iter = iterPool.Get()
-		iter.Reset(tags)
-	}
-	defer iter.Close()
-
+func IsRollupID(name []byte, tags []byte) bool {
+	iter := newPooledSortedTagIterator(tags, nil)
 	for iter.Next() {
 		name, val := iter.Current()
 		if bytes.Equal(name, rollupTagPair.Name) && bytes.Equal(val, rollupTagPair.Value) {
@@ -103,8 +93,8 @@ func IsRollupID(name []byte, tags []byte, iterPool id.SortedTagIteratorPool) boo
 
 // TODO(xichen): pool the mids.
 type metricID struct {
-	id       []byte
 	iterPool id.SortedTagIteratorPool
+	id       []byte
 }
 
 // NewID creates a new m3 metric id.
@@ -150,12 +140,12 @@ func NameAndTags(id []byte) ([]byte, []byte, error) {
 }
 
 type sortedTagIterator struct {
-	sortedTagPairs []byte
-	idx            int
-	tagName        []byte
-	tagValue       []byte
 	err            error
 	pool           id.SortedTagIteratorPool
+	sortedTagPairs []byte
+	tagName        []byte
+	tagValue       []byte
+	idx            int
 }
 
 // NewSortedTagIterator creates a new sorted tag iterator.
@@ -165,7 +155,12 @@ func NewSortedTagIterator(sortedTagPairs []byte) id.SortedTagIterator {
 
 // NewPooledSortedTagIterator creates a new pooled sorted tag iterator.
 func NewPooledSortedTagIterator(sortedTagPairs []byte, pool id.SortedTagIteratorPool) id.SortedTagIterator {
-	it := &sortedTagIterator{pool: pool}
+	it := newPooledSortedTagIterator(sortedTagPairs, pool)
+	return &it
+}
+
+func newPooledSortedTagIterator(sortedTagPairs []byte, pool id.SortedTagIteratorPool) sortedTagIterator {
+	it := sortedTagIterator{pool: pool}
 	it.Reset(sortedTagPairs)
 	return it
 }

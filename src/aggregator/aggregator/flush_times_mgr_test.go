@@ -25,12 +25,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"github.com/uber-go/tally"
+
 	schema "github.com/m3db/m3/src/aggregator/generated/proto/flush"
 	"github.com/m3db/m3/src/cluster/kv"
 	"github.com/m3db/m3/src/cluster/kv/mem"
-
-	"github.com/stretchr/testify/require"
-	"github.com/uber-go/tally"
 )
 
 const (
@@ -178,6 +178,20 @@ func TestFlushTimesManagerStoreAsyncSuccess(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func TestFlushTimesManagerStoreSyncSuccess(t *testing.T) {
+	mgr, store := testFlushTimesManager()
+	require.NoError(t, mgr.Open(testShardSetID))
+
+	// Store flush times and wait for change to propagate.
+	require.NoError(t, mgr.StoreSync(testFlushTimesProto))
+	value, err := store.Get(testFlushTimesKey)
+	require.NoError(t, err)
+	require.NotNil(t, value)
+	var res schema.ShardSetFlushTimes
+	require.NoError(t, value.Unmarshal(&res))
+	require.Equal(t, *testFlushTimesProto, res)
 }
 
 func TestFlushTimesManagerCloseClosed(t *testing.T) {

@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2019 Uber Technologies, Inc.
@@ -26,12 +27,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/retention"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestCommitLogBootstrapColdWrites(t *testing.T) {
@@ -85,7 +86,7 @@ func testCommitLogBootstrapColdWrites(t *testing.T, setTestOpts setTestOptions, 
 		updateInputConfig(dataFilesData)
 	}
 	dataFilesSeriesMaps := generate.BlocksByStart(dataFilesData)
-	require.NoError(t, writeTestDataToDisk(ns1, setup, dataFilesSeriesMaps, 0))
+	require.NoError(t, writeTestDataToDiskWithIndex(ns1, setup, dataFilesSeriesMaps))
 	log.Info("finished writing data files")
 
 	log.Info("writing commit logs")
@@ -105,7 +106,7 @@ func testCommitLogBootstrapColdWrites(t *testing.T, setTestOpts setTestOptions, 
 	// not contains the same series.
 	allSeriesMaps := make(map[xtime.UnixNano]generate.SeriesBlock, len(dataFilesSeriesMaps))
 	for i := -2; i < 0; i++ {
-		unixNano := xtime.ToUnixNano(start.Add(time.Duration(i) * blockSize))
+		unixNano := start.Add(time.Duration(i) * blockSize)
 		series := append(dataFilesSeriesMaps[unixNano], commitLogSeriesMaps[unixNano]...)
 		allSeriesMaps[unixNano] = series
 	}

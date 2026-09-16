@@ -21,19 +21,23 @@
 package storage
 
 import (
+	"bytes"
 	"fmt"
+	"time"
 
 	"github.com/m3db/m3/src/dbnode/storage/index"
 	"github.com/m3db/m3/src/m3ninx/idx"
 	"github.com/m3db/m3/src/query/models"
 	"github.com/m3db/m3/src/query/storage/m3/consolidators"
+	xerrors "github.com/m3db/m3/src/x/errors"
 	"github.com/m3db/m3/src/x/ident"
+	"github.com/m3db/m3/src/x/regexp"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
-const (
-	dot  = byte('.')
-	plus = byte('+')
-	star = byte('*')
+var (
+	dotStar = []byte(".*")
+	dotPlus = []byte(".+")
 )
 
 // FromM3IdentToMetric converts an M3 ident metric to a coordinator metric.
@@ -68,14 +72,58 @@ func TagsToIdentTagIterator(tags models.Tags) ident.TagIterator {
 }
 
 // FetchOptionsToM3Options converts a set of coordinator options to M3 options.
-func FetchOptionsToM3Options(fetchOptions *FetchOptions, fetchQuery *FetchQuery) index.QueryOptions {
-	return index.QueryOptions{
-		SeriesLimit:       fetchOptions.SeriesLimit,
-		DocsLimit:         fetchOptions.DocsLimit,
-		RequireExhaustive: fetchOptions.RequireExhaustive,
-		StartInclusive:    fetchQuery.Start,
-		EndExclusive:      fetchQuery.End,
+func FetchOptionsToM3Options(
+	fetchOptions *FetchOptions,
+	fetchQuery *FetchQuery,
+) (index.QueryOptions, error) {
+	start, end, err := convertStartEndWithRangeLimit(fetchQuery.Start,
+		fetchQuery.End, fetchOptions)
+	if err != nil {
+		return index.QueryOptions{}, err
 	}
+
+	return index.QueryOptions{
+		SeriesLimit:                   fetchOptions.SeriesLimit,
+		InstanceMultiple:              fetchOptions.InstanceMultiple,
+		DocsLimit:                     fetchOptions.DocsLimit,
+		RequireExhaustive:             fetchOptions.RequireExhaustive,
+		RequireNoWait:                 fetchOptions.RequireNoWait,
+		ReadConsistencyLevel:          fetchOptions.ReadConsistencyLevel,
+		IterateEqualTimestampStrategy: fetchOptions.IterateEqualTimestampStrategy,
+		Source:                        fetchOptions.Source,
+		StartInclusive:                xtime.ToUnixNano(start),
+		EndExclusive:                  xtime.ToUnixNano(end),
+	}, nil
+}
+
+func convertStartEndWithRangeLimit(
+	start, end time.Time,
+	fetchOptions *FetchOptions,
+) (time.Time, time.Time, error) {
+	fetchRangeLimit := fetchOptions.RangeLimit
+	if fetchRangeLimit <= 0 {
+		return start, end, nil
+	}
+
+	fetchRange := end.Sub(start)
+	if fetchRange <= fetchRangeLimit {
+		return start, end, nil
+	}
+
+	if fetchOptions.RequireExhaustive {
+		// Fail the query.
+		msg := fmt.Sprintf("query exceeded limit: require_exhaustive=%v, "+
+			"range_limit=%s, range_matched=%s",
+			fetchOptions.RequireExhaustive,
+			fetchRangeLimit.String(),
+			fetchRange.String())
+		err := xerrors.NewInvalidParamsError(consolidators.NewLimitError(msg))
+		return time.Time{}, time.Time{}, err
+	}
+
+	// Truncate the range.
+	start = end.Add(-1 * fetchRangeLimit)
+	return start, end, nil
 }
 
 func convertAggregateQueryType(completeNameOnly bool) index.AggregationType {
@@ -91,17 +139,26 @@ func convertAggregateQueryType(completeNameOnly bool) index.AggregationType {
 func FetchOptionsToAggregateOptions(
 	fetchOptions *FetchOptions,
 	tagQuery *CompleteTagsQuery,
-) index.AggregationOptions {
+) (index.AggregationOptions, error) {
+	start, end, err := convertStartEndWithRangeLimit(tagQuery.Start.ToTime(),
+		tagQuery.End.ToTime(), fetchOptions)
+	if err != nil {
+		return index.AggregationOptions{}, err
+	}
+
 	return index.AggregationOptions{
 		QueryOptions: index.QueryOptions{
-			SeriesLimit:    fetchOptions.SeriesLimit,
-			DocsLimit:      fetchOptions.DocsLimit,
-			StartInclusive: tagQuery.Start,
-			EndExclusive:   tagQuery.End,
+			SeriesLimit:       fetchOptions.SeriesLimit,
+			DocsLimit:         fetchOptions.DocsLimit,
+			Source:            fetchOptions.Source,
+			RequireExhaustive: fetchOptions.RequireExhaustive,
+			RequireNoWait:     fetchOptions.RequireNoWait,
+			StartInclusive:    xtime.ToUnixNano(start),
+			EndExclusive:      xtime.ToUnixNano(end),
 		},
 		FieldFilter: tagQuery.FilterNameTags,
 		Type:        convertAggregateQueryType(tagQuery.CompleteNameOnly),
-	}
+	}, nil
 }
 
 // FetchQueryToM3Query converts an m3coordinator fetch query to an M3 query.
@@ -120,7 +177,10 @@ func FetchQueryToM3Query(
 
 	// Optimization for single matcher case.
 	if len(matchers) == 1 {
-		specialCase := isSpecialCaseMatcher(matchers[0])
+		specialCase, err := isSpecialCaseMatcher(matchers[0])
+		if err != nil {
+			return index.Query{}, err
+		}
 		if specialCase.skip {
 			// NB: only matcher has no effect; this is synonymous to an AllQuery.
 			return index.Query{
@@ -142,7 +202,10 @@ func FetchQueryToM3Query(
 
 	idxQueries := make([]idx.Query, 0, len(matchers))
 	for _, matcher := range matchers {
-		specialCase := isSpecialCaseMatcher(matcher)
+		specialCase, err := isSpecialCaseMatcher(matcher)
+		if err != nil {
+			return index.Query{}, err
+		}
 		if specialCase.skip {
 			continue
 		}
@@ -171,55 +234,81 @@ type specialCase struct {
 	skip      bool
 }
 
-func isSpecialCaseMatcher(matcher models.Matcher) specialCase {
+func isSpecialCaseMatcher(matcher models.Matcher) (specialCase, error) {
 	if len(matcher.Value) == 0 {
 		if matcher.Type == models.MatchNotRegexp ||
 			matcher.Type == models.MatchNotEqual {
 			query := idx.NewFieldQuery(matcher.Name)
-			return specialCase{query: query, isSpecial: true}
+			return specialCase{query: query, isSpecial: true}, nil
 		}
 
 		if matcher.Type == models.MatchRegexp ||
 			matcher.Type == models.MatchEqual {
 			query := idx.NewNegationQuery(idx.NewFieldQuery(matcher.Name))
-			return specialCase{query: query, isSpecial: true}
+			return specialCase{query: query, isSpecial: true}, nil
 		}
 
-		return specialCase{}
+		return specialCase{}, nil
 	}
 
-	// NB: no special case for regex / not regex here.
+	// NB: no special case except for regex / notRegex here.
 	isNegatedRegex := matcher.Type == models.MatchNotRegexp
 	isRegex := matcher.Type == models.MatchRegexp
 	if !isNegatedRegex && !isRegex {
-		return specialCase{}
+		return specialCase{}, nil
 	}
 
-	if len(matcher.Value) != 2 || matcher.Value[0] != dot {
-		return specialCase{}
-	}
-
-	if matcher.Value[1] == star {
+	if bytes.Equal(matcher.Value, dotStar) {
 		if isNegatedRegex {
 			// NB: This should match no results.
 			query := idx.NewNegationQuery(idx.NewAllQuery())
-			return specialCase{query: query, isSpecial: true}
+			return specialCase{query: query, isSpecial: true}, nil
 		}
 
 		// NB: this matcher should not affect query results.
-		return specialCase{skip: true}
+		return specialCase{skip: true}, nil
 	}
 
-	if matcher.Value[1] == plus {
+	if bytes.Equal(matcher.Value, dotPlus) {
 		query := idx.NewFieldQuery(matcher.Name)
 		if isNegatedRegex {
 			query = idx.NewNegationQuery(query)
 		}
 
-		return specialCase{query: query, isSpecial: true}
+		return specialCase{query: query, isSpecial: true}, nil
 	}
 
-	return specialCase{}
+	matchesEmpty, err := regexp.MatchesEmptyValue(matcher.Value)
+	if err != nil {
+		return specialCase{}, regexError(err)
+	}
+
+	if matchesEmpty {
+		regexpQuery, err := idx.NewRegexpQuery(matcher.Name, matcher.Value)
+		if err != nil {
+			return specialCase{}, err
+		}
+
+		if isNegatedRegex {
+			return specialCase{
+				query: idx.NewConjunctionQuery(
+					idx.NewNegationQuery(regexpQuery),
+					idx.NewFieldQuery(matcher.Name),
+				),
+				isSpecial: true,
+			}, nil
+		}
+
+		return specialCase{
+			query: idx.NewDisjunctionQuery(
+				regexpQuery,
+				idx.NewNegationQuery(idx.NewFieldQuery(matcher.Name)),
+			),
+			isSpecial: true,
+		}, nil
+	}
+
+	return specialCase{}, nil
 }
 
 func matcherToQuery(matcher models.Matcher) (idx.Query, error) {
@@ -278,4 +367,8 @@ func matcherToQuery(matcher models.Matcher) (idx.Query, error) {
 	default:
 		return idx.Query{}, fmt.Errorf("unsupported query type: %v", matcher)
 	}
+}
+
+func regexError(err error) error {
+	return xerrors.NewInvalidParamsError(xerrors.Wrap(err, "regex error"))
 }

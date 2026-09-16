@@ -23,10 +23,10 @@ package m3
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/metrics/metric/id"
 	"github.com/m3db/m3/src/x/pool"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestNewRollupID(t *testing.T) {
@@ -53,7 +53,7 @@ func TestIsRollupIDNilIterator(t *testing.T) {
 		{name: []byte("foo"), tags: []byte("a1=b1,a2=b2"), expected: false},
 	}
 	for _, input := range inputs {
-		require.Equal(t, input.expected, IsRollupID(input.name, input.tags, nil), string(input.tags))
+		require.Equal(t, input.expected, IsRollupID(input.name, input.tags), string(input.tags))
 	}
 }
 
@@ -72,7 +72,7 @@ func TestIsRollupIDExternalIterator(t *testing.T) {
 		return NewPooledSortedTagIterator(nil, p)
 	})
 	for _, input := range inputs {
-		require.Equal(t, input.expected, IsRollupID(input.name, input.tags, p))
+		require.Equal(t, input.expected, IsRollupID(input.name, input.tags))
 	}
 }
 

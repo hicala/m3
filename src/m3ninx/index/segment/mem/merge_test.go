@@ -23,48 +23,48 @@ package mem
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/m3ninx/doc"
 	"github.com/m3db/m3/src/m3ninx/index"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestMemSegmentMerge(t *testing.T) {
-	docs := []doc.Document{
-		doc.Document{
+	docs := []doc.Metadata{
+		{
 			ID: []byte("abc"),
 			Fields: []doc.Field{
-				doc.Field{
+				{
 					Name:  []byte("fruit"),
 					Value: []byte("banana"),
 				},
-				doc.Field{
+				{
 					Name:  []byte("color"),
 					Value: []byte("yellow"),
 				},
 			},
 		},
-		doc.Document{
+		{
 			ID: []byte("cde"),
 			Fields: []doc.Field{
-				doc.Field{
+				{
 					Name:  []byte("fruit"),
 					Value: []byte("apple"),
 				},
-				doc.Field{
+				{
 					Name:  []byte("color"),
 					Value: []byte("red"),
 				},
 			},
 		},
-		doc.Document{
+		{
 			ID: []byte("dfg"),
 			Fields: []doc.Field{
-				doc.Field{
+				{
 					Name:  []byte("fruit"),
 					Value: []byte("pineapple"),
 				},
-				doc.Field{
+				{
 					Name:  []byte("color"),
 					Value: []byte("yellow"),
 				},
@@ -102,7 +102,7 @@ func TestMemSegmentMerge(t *testing.T) {
 	require.NoError(t, reader.Close())
 }
 
-func assertReaderHasDoc(t *testing.T, r index.Reader, d doc.Document) {
+func assertReaderHasDoc(t *testing.T, r index.Reader, d doc.Metadata) {
 	iter, err := r.AllDocs()
 	require.NoError(t, err)
 	found := false

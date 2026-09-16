@@ -24,6 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/query/block"
 	"github.com/m3db/m3/src/query/executor/transform"
 	"github.com/m3db/m3/src/query/models"
@@ -31,14 +34,11 @@ import (
 	"github.com/m3db/m3/src/query/test"
 	"github.com/m3db/m3/src/query/test/executor"
 	"github.com/m3db/m3/src/query/test/transformtest"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestTime(t *testing.T) {
 	_, bounds := test.GenerateValuesAndBounds(nil, nil)
-	c, sink := executor.NewControllerWithSink(parser.NodeID(0))
+	c, sink := executor.NewControllerWithSink(parser.NodeID(rune(0)))
 	op, err := NewTimeOp(models.NewTagOptions())
 	require.NoError(t, err)
 
@@ -60,7 +60,7 @@ func TestTime(t *testing.T) {
 	assert.Equal(t, block.BlockTime, sink.Info.Type())
 
 	for i, vals := range sink.Values {
-		assert.Equal(t, float64(start.Add(time.Duration(i)*step).Unix()), vals[0])
+		assert.Equal(t, float64(start.Add(time.Duration(i)*step).Seconds()), vals[0])
 	}
 
 	resultMeta := sink.Meta.ResultMetadata

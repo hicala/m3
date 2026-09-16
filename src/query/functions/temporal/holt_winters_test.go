@@ -24,10 +24,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m3db/m3/src/query/executor/transform"
-	"github.com/m3db/m3/src/query/test"
-
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/query/executor/transform"
+	"github.com/m3db/m3/src/query/test/compare"
 )
 
 var holtWintersTestCases = []testCase{
@@ -69,5 +69,5 @@ func TestHoltWintersFn(t *testing.T) {
 	holtWintersFn := makeHoltWintersFn(0.2, 0.6)
 	testData := []float64{nan, 1, nan, 5, 10, 15, nan, nan}
 	val := holtWintersFn(testData)
-	test.EqualsWithNansWithDelta(t, 13.6559, val, 0.0001)
+	compare.EqualsWithNansWithDelta(t, 13.6559, val, 0.0001)
 }

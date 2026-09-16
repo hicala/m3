@@ -24,10 +24,9 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/m3db/m3/src/dbnode/storage/index/convert"
 	"github.com/m3db/m3/src/m3ninx/doc"
+	"github.com/m3db/m3/src/m3ninx/index/segment/fst/encoding/docs"
 	"github.com/m3db/m3/src/x/ident"
-	"github.com/m3db/m3/src/x/pool"
 )
 
 var (
@@ -44,14 +43,15 @@ type results struct {
 	nsID ident.ID
 	opts QueryResultsOptions
 
+	reusableID     *ident.ReusableBytesID
 	resultsMap     *ResultsMap
 	totalDocsCount int
 
-	idPool    ident.Pool
-	bytesPool pool.CheckedBytesPool
+	// Utilization stats, do not reset.
+	resultsUtilizationStats resultsUtilizationStats
 
-	pool       QueryResultsPool
-	noFinalize bool
+	idPool ident.Pool
+	pool   QueryResultsPool
 }
 
 // NewQueryResults returns a new query results object.
@@ -63,10 +63,10 @@ func NewQueryResults(
 	return &results{
 		nsID:       namespaceID,
 		opts:       opts,
-		resultsMap: newResultsMap(indexOpts.IdentifierPool()),
+		resultsMap: newResultsMap(),
 		idPool:     indexOpts.IdentifierPool(),
-		bytesPool:  indexOpts.CheckedBytesPool(),
 		pool:       indexOpts.QueryResultsPool(),
+		reusableID: ident.NewReusableBytesID(),
 	}
 }
 
@@ -84,18 +84,10 @@ func (r *results) Reset(nsID ident.ID, opts QueryResultsOptions) {
 		nsID = r.idPool.Clone(nsID)
 	}
 	r.nsID = nsID
-	// Reset all values from map first if they are present.
-	for _, entry := range r.resultsMap.Iter() {
-		tags := entry.Value()
-		tags.Close()
-	}
 
 	// Reset all keys in the map next, this will finalize the keys.
 	r.resultsMap.Reset()
 	r.totalDocsCount = 0
-
-	// NB: could do keys+value in one step but I'm trying to avoid
-	// using an internal method of a code-gen'd type.
 
 	r.opts = opts
 
@@ -128,29 +120,30 @@ func (r *results) addDocumentsBatchWithLock(batch []doc.Document) error {
 	return nil
 }
 
-func (r *results) addDocumentWithLock(d doc.Document) (bool, int, error) {
-	if len(d.ID) == 0 {
+func (r *results) addDocumentWithLock(w doc.Document) (bool, int, error) {
+	id, err := docs.ReadIDFromDocument(w)
+	if err != nil {
+		return false, r.resultsMap.Len(), err
+	}
+
+	if len(id) == 0 {
 		return false, r.resultsMap.Len(), errUnableToAddResultMissingID
 	}
 
-	// NB: can cast the []byte -> ident.ID to avoid an alloc
-	// before we're sure we need it.
-	tsID := ident.BytesID(d.ID)
-
 	// Need to apply filter if set first.
-	if r.opts.FilterID != nil && !r.opts.FilterID(tsID) {
+	r.reusableID.Reset(id)
+	if r.opts.FilterID != nil && !r.opts.FilterID(r.reusableID) {
 		return false, r.resultsMap.Len(), nil
 	}
 
 	// check if it already exists in the map.
-	if r.resultsMap.Contains(tsID) {
+	if r.resultsMap.Contains(id) {
 		return false, r.resultsMap.Len(), nil
 	}
 
-	tags := convert.ToSeriesTags(d, convert.Opts{NoClone: true})
 	// It is assumed that the document is valid for the lifetime of the index
 	// results.
-	r.resultsMap.SetUnsafe(tsID, tags, resultMapNoFinalizeOpts)
+	r.resultsMap.SetUnsafe(id, w, resultMapNoFinalizeOpts)
 
 	return true, r.resultsMap.Len(), nil
 }
@@ -184,11 +177,14 @@ func (r *results) TotalDocsCount() int {
 }
 
 func (r *results) Finalize() {
+	r.Lock()
+	returnToPool := r.resultsUtilizationStats.updateAndCheck(r.totalDocsCount)
+	r.Unlock()
+
 	// Reset locks so cannot hold onto lock for call to Finalize.
 	r.Reset(nil, QueryResultsOptions{})
 
-	if r.pool == nil {
-		return
+	if r.pool != nil && returnToPool {
+		r.pool.Put(r)
 	}
-	r.pool.Put(r)
 }

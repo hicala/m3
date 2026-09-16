@@ -26,14 +26,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/uber-go/tally"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/sharding"
 	"github.com/m3db/m3/src/dbnode/storage"
 	"github.com/m3db/m3/src/dbnode/topology"
-	"github.com/m3db/m3/src/x/instrument"
-
-	"github.com/uber-go/tally"
-	"go.uber.org/zap"
 )
 
 var (
@@ -169,8 +168,8 @@ func (d *clusterDB) Close() error {
 // it is safe to continue a deploy or performing topology changes. In that case,
 // we only need to determine two things:
 //
-//     1. Is the node bootstrapped?
-//     2. Are all of its shards available?
+//  1. Is the node bootstrapped?
+//  2. Are all of its shards available?
 //
 // If so, then the node has finished bootstrapping and will be able to recover
 // all of its data (assuming the default bootstrapper configuration of
@@ -357,9 +356,9 @@ func (d *clusterDB) analyzeAndReportShardStates() {
 
 	defer reportStats()
 
-	// Manage the reuseable vars
-	d.resetReuseable()
-	defer d.resetReuseable()
+	// Manage the reusable vars
+	d.resetReusable()
+	defer d.resetReusable()
 
 	for _, s := range entry.ShardSet().All() {
 		if s.State() == shard.Initializing {
@@ -408,14 +407,13 @@ func (d *clusterDB) analyzeAndReportShardStates() {
 	for id := range d.initializing {
 		count := d.bootstrapCount[id]
 		if count != len(namespaces) {
-			// Should never happen if bootstrapped and durable.
-			instrument.EmitAndLogInvariantViolation(d.opts.InstrumentOptions(), func(l *zap.Logger) {
-				l.With(
-					zap.Uint32("shard", id),
-					zap.Int("count", count),
-					zap.Int("numNamespaces", len(namespaces)),
-				).Error("database indicated that it was bootstrapped and durable, but number of bootstrapped shards did not match number of namespaces")
-			})
+			// This could temporarily occur due to the race condition, e.g. database was bootstrapped and durable
+			// at the time we checked but then new shards were assigned which are still not bootstrapped.
+			d.log.Debug("database indicated that it was bootstrapped and durable, "+
+				"but number of bootstrapped shards did not match number of namespaces",
+				zap.Uint32("shard", id),
+				zap.Int("count", count),
+				zap.Int("numNamespaces", len(namespaces)))
 			continue
 		}
 
@@ -441,7 +439,7 @@ func (d *clusterDB) analyzeAndReportShardStates() {
 		zap.Uint32s("shards", markAvailable))
 }
 
-func (d *clusterDB) resetReuseable() {
+func (d *clusterDB) resetReusable() {
 	d.resetInitializing()
 	d.resetBootstrapCount()
 }

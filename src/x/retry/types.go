@@ -22,11 +22,12 @@
 package retry
 
 import (
+	"context"
 	"time"
 
-	"github.com/m3db/m3/src/x/errors"
-
 	"github.com/uber-go/tally"
+
+	"github.com/m3db/m3/src/x/errors"
 )
 
 // RetryableError returns a retryable error.
@@ -57,8 +58,11 @@ type Retrier interface {
 	// Attempt will attempt to perform a function with retries.
 	Attempt(fn Fn) error
 
-	// Attempt will attempt to perform a function with retries.
+	// AttemptWhile will attempt to perform a function with retries.
 	AttemptWhile(continueFn ContinueFn, fn Fn) error
+
+	// AttemptContext attempts fn with retries until ctx is canceled (e.g., due to timeout).
+	AttemptContext(ctx context.Context, fn Fn) error
 }
 
 // Options is a set of retry options.

@@ -1,4 +1,6 @@
+//go:build integration
 // +build integration
+
 //
 // Copyright (c) 2016 Uber Technologies, Inc.
 //
@@ -29,16 +31,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/cluster/services"
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/client"
 	"github.com/m3db/m3/src/dbnode/topology"
 	xclock "github.com/m3db/m3/src/x/clock"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
 
 func TestIndexMultipleNodeHighConcurrency(t *testing.T) {
@@ -66,12 +68,13 @@ func TestIndexMultipleNodeHighConcurrency(t *testing.T) {
 				minShard := uint32(0)
 				maxShard := uint32(numShards - 1)
 
-				// nodes = m3db nodes
-				nodes, closeFn, clientopts := makeMultiNodeSetup(t, numShards, true, true, []services.ServiceInstance{
+				instances := []services.ServiceInstance{
 					node(t, 0, newClusterShardsRange(minShard, maxShard, shard.Available)),
 					node(t, 1, newClusterShardsRange(minShard, maxShard, shard.Available)),
 					node(t, 2, newClusterShardsRange(minShard, maxShard, shard.Available)),
-				})
+				}
+				// nodes = m3db nodes
+				nodes, closeFn, clientopts := makeMultiNodeSetup(t, numShards, true, true, instances) //nolint:govet
 				clientopts = clientopts.SetReadConsistencyLevel(lvl)
 
 				defer closeFn()
@@ -91,7 +94,7 @@ func TestIndexMultipleNodeHighConcurrency(t *testing.T) {
 					insertWg       sync.WaitGroup
 					numTotalErrors uint32
 				)
-				now := nodes[0].DB().Options().ClockOptions().NowFn()()
+				now := xtime.ToUnixNano(nodes[0].DB().Options().ClockOptions().NowFn()())
 				start := time.Now()
 				log.Info("starting data write")
 

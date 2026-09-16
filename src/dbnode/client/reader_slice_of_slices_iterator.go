@@ -30,7 +30,7 @@ import (
 	xtime "github.com/m3db/m3/src/x/time"
 )
 
-var timeZero = time.Time{}
+var timeZero = xtime.UnixNano(0)
 
 type readerSliceOfSlicesIterator struct {
 	segments     []*rpc.Segments
@@ -40,7 +40,8 @@ type readerSliceOfSlicesIterator struct {
 	pool         *readerSliceOfSlicesIteratorPool
 }
 
-func newReaderSliceOfSlicesIterator(
+// NewReaderSliceOfSlicesIterator returns new reader slice of slices iterator.
+func NewReaderSliceOfSlicesIterator(
 	segments []*rpc.Segments,
 	pool *readerSliceOfSlicesIteratorPool,
 ) *readerSliceOfSlicesIterator {
@@ -129,7 +130,7 @@ func (it *readerSliceOfSlicesIterator) currentLen() int {
 	return len(it.segments[it.idx].Unmerged)
 }
 
-func (it *readerSliceOfSlicesIterator) CurrentReaders() (int, time.Time, time.Duration) {
+func (it *readerSliceOfSlicesIterator) CurrentReaders() (int, xtime.UnixNano, time.Duration) {
 	segments := it.segments[it.idx]
 	if segments.Merged != nil {
 		return 1, timeConvert(segments.Merged.StartTime), durationConvert(segments.Merged.BlockSize)
@@ -141,11 +142,12 @@ func (it *readerSliceOfSlicesIterator) CurrentReaders() (int, time.Time, time.Du
 	return unmerged, timeConvert(segments.Unmerged[0].StartTime), durationConvert(segments.Unmerged[0].BlockSize)
 }
 
-func timeConvert(ticks *int64) time.Time {
+func timeConvert(ticks *int64) xtime.UnixNano {
 	if ticks == nil {
 		return timeZero
 	}
-	return xtime.FromNormalizedTime(*ticks, time.Nanosecond)
+
+	return xtime.UnixNano(*ticks)
 }
 
 func durationConvert(duration *int64) time.Duration {

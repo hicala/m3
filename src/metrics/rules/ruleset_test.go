@@ -26,6 +26,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/stretchr/testify/require"
+	"github.com/twmb/murmur3"
+
 	"github.com/m3db/m3/src/metrics/aggregation"
 	merrors "github.com/m3db/m3/src/metrics/errors"
 	"github.com/m3db/m3/src/metrics/filters"
@@ -34,6 +39,7 @@ import (
 	"github.com/m3db/m3/src/metrics/generated/proto/pipelinepb"
 	"github.com/m3db/m3/src/metrics/generated/proto/policypb"
 	"github.com/m3db/m3/src/metrics/generated/proto/rulepb"
+	"github.com/m3db/m3/src/metrics/matcher/namespace"
 	"github.com/m3db/m3/src/metrics/metadata"
 	"github.com/m3db/m3/src/metrics/metric"
 	"github.com/m3db/m3/src/metrics/metric/id"
@@ -42,12 +48,9 @@ import (
 	"github.com/m3db/m3/src/metrics/rules/view"
 	"github.com/m3db/m3/src/metrics/rules/view/changes"
 	xbytes "github.com/m3db/m3/src/metrics/x/bytes"
+	"github.com/m3db/m3/src/query/models"
 	xerrors "github.com/m3db/m3/src/x/errors"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -63,7 +66,7 @@ var (
 			activeRuleSet{}.newRollupIDFn,
 			activeRuleSet{}.isRollupIDFn,
 		),
-		cmpopts.IgnoreInterfaces(struct{ filters.Filter }{}),
+		cmpopts.IgnoreInterfaces(struct{ filters.TagsFilter }{}),
 		cmpopts.IgnoreInterfaces(struct{ aggregation.TypesOptions }{}),
 	}
 	testRuleSetCmpOpts = []cmp.Option{
@@ -77,7 +80,7 @@ var (
 			ruleSet{}.newRollupIDFn,
 			ruleSet{}.isRollupIDFn,
 		),
-		cmpopts.IgnoreInterfaces(struct{ filters.Filter }{}),
+		cmpopts.IgnoreInterfaces(struct{ filters.TagsFilter }{}),
 		cmpopts.IgnoreInterfaces(struct{ aggregation.TypesOptions }{}),
 	}
 )
@@ -201,6 +204,7 @@ func TestRuleSetActiveSet(t *testing.T) {
 			rs.tagsFilterOpts,
 			rs.newRollupIDFn,
 			rs.isRollupIDFn,
+			rs.includeTagKeys,
 		)
 		require.True(t, cmp.Equal(expected, as, testActiveRuleSetCmpOpts...))
 	}
@@ -274,6 +278,42 @@ func TestRuleSetLatest(t *testing.T) {
 	latest, err := rs.Latest()
 	require.NoError(t, err)
 
+	r1, err := pipeline.NewRollupOp(
+		pipeline.GroupByRollupType,
+		"rName1",
+		[]string{"rtagName1", "rtagName2"},
+		aggregation.DefaultID,
+	)
+	require.NoError(t, err)
+	r3, err := pipeline.NewRollupOp(
+		pipeline.GroupByRollupType,
+		"rName3",
+		[]string{"rtagName1", "rtagName2"},
+		aggregation.DefaultID,
+	)
+	require.NoError(t, err)
+	r4, err := pipeline.NewRollupOp(
+		pipeline.GroupByRollupType,
+		"rName4",
+		[]string{"rtagName1", "rtagName2"},
+		aggregation.DefaultID,
+	)
+	require.NoError(t, err)
+	r5, err := pipeline.NewRollupOp(
+		pipeline.GroupByRollupType,
+		"rName5",
+		[]string{"rtagName1"},
+		aggregation.DefaultID,
+	)
+	require.NoError(t, err)
+	r6, err := pipeline.NewRollupOp(
+		pipeline.GroupByRollupType,
+		"rName6",
+		[]string{"rtagName1", "rtagName2"},
+		aggregation.DefaultID,
+	)
+	require.NoError(t, err)
+
 	expected := view.RuleSet{
 		Namespace:     "testNamespace",
 		Version:       123,
@@ -288,6 +328,7 @@ func TestRuleSetLatest(t *testing.T) {
 				StoragePolicies: policy.StoragePolicies{
 					policy.NewStoragePolicy(30*time.Second, xtime.Second, 6*time.Hour),
 				},
+				Tags: []models.Tag{},
 			},
 			{
 				ID:            "mappingRule3",
@@ -299,6 +340,7 @@ func TestRuleSetLatest(t *testing.T) {
 					policy.NewStoragePolicy(10*time.Second, xtime.Second, 2*time.Hour),
 					policy.NewStoragePolicy(time.Minute, xtime.Minute, time.Hour),
 				},
+				Tags: []models.Tag{},
 			},
 			{
 				ID:            "mappingRule4",
@@ -309,6 +351,7 @@ func TestRuleSetLatest(t *testing.T) {
 				StoragePolicies: policy.StoragePolicies{
 					policy.NewStoragePolicy(10*time.Second, xtime.Second, 24*time.Hour),
 				},
+				Tags: []models.Tag{},
 			},
 			{
 				ID:            "mappingRule5",
@@ -320,6 +363,7 @@ func TestRuleSetLatest(t *testing.T) {
 				StoragePolicies: policy.StoragePolicies{
 					policy.NewStoragePolicy(10*time.Second, xtime.Second, 24*time.Hour),
 				},
+				Tags: []models.Tag{},
 			},
 		},
 		RollupRules: []view.RollupRule{
@@ -328,15 +372,13 @@ func TestRuleSetLatest(t *testing.T) {
 				Name:       "rollupRule1.snapshot3",
 				Tombstoned: false,
 				Filter:     "rtagName1:rtagValue1 rtagName2:rtagValue2",
+				Tags:       []models.Tag{},
 				Targets: []view.RollupTarget{
 					{
 						Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 							{
-								Type: pipeline.RollupOpType,
-								Rollup: pipeline.RollupOp{
-									NewName: b("rName1"),
-									Tags:    bs("rtagName1", "rtagName2"),
-								},
+								Type:   pipeline.RollupOpType,
+								Rollup: r1,
 							},
 						}),
 						StoragePolicies: policy.StoragePolicies{
@@ -350,15 +392,13 @@ func TestRuleSetLatest(t *testing.T) {
 				Name:       "rollupRule3.snapshot2",
 				Tombstoned: false,
 				Filter:     "rtagName1:rtagValue1 rtagName2:rtagValue2",
+				Tags:       []models.Tag{},
 				Targets: []view.RollupTarget{
 					{
 						Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 							{
-								Type: pipeline.RollupOpType,
-								Rollup: pipeline.RollupOp{
-									NewName: b("rName3"),
-									Tags:    bs("rtagName1", "rtagName2"),
-								},
+								Type:   pipeline.RollupOpType,
+								Rollup: r3,
 							},
 						}),
 						StoragePolicies: policy.StoragePolicies{
@@ -373,15 +413,13 @@ func TestRuleSetLatest(t *testing.T) {
 				Name:       "rollupRule4.snapshot1",
 				Tombstoned: false,
 				Filter:     "rtagName1:rtagValue2",
+				Tags:       []models.Tag{},
 				Targets: []view.RollupTarget{
 					{
 						Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 							{
-								Type: pipeline.RollupOpType,
-								Rollup: pipeline.RollupOp{
-									NewName: b("rName4"),
-									Tags:    bs("rtagName1", "rtagName2"),
-								},
+								Type:   pipeline.RollupOpType,
+								Rollup: r4,
 							},
 						}),
 						StoragePolicies: policy.StoragePolicies{
@@ -395,15 +433,13 @@ func TestRuleSetLatest(t *testing.T) {
 				Name:       "rollupRule5.snapshot1",
 				Tombstoned: false,
 				Filter:     "rtagName1:rtagValue2",
+				Tags:       []models.Tag{},
 				Targets: []view.RollupTarget{
 					{
 						Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 							{
-								Type: pipeline.RollupOpType,
-								Rollup: pipeline.RollupOp{
-									NewName: b("rName5"),
-									Tags:    bs("rtagName1"),
-								},
+								Type:   pipeline.RollupOpType,
+								Rollup: r5,
 							},
 						}),
 						StoragePolicies: policy.StoragePolicies{
@@ -417,15 +453,13 @@ func TestRuleSetLatest(t *testing.T) {
 				Name:       "rollupRule6.snapshot1",
 				Tombstoned: false,
 				Filter:     "rtagName1:rtagValue1 rtagName2:rtagValue2",
+				Tags:       []models.Tag{},
 				Targets: []view.RollupTarget{
 					{
 						Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 							{
-								Type: pipeline.RollupOpType,
-								Rollup: pipeline.RollupOp{
-									NewName: b("rName6"),
-									Tags:    bs("rtagName1", "rtagName2"),
-								},
+								Type:   pipeline.RollupOpType,
+								Rollup: r6,
 							},
 						}),
 						StoragePolicies: policy.StoragePolicies{
@@ -566,10 +600,9 @@ func TestRuleSetAddMappingRuleDuplicateRule(t *testing.T) {
 	newID, err := rs.AddMappingRule(view, helper.NewUpdateMetadata(nowNanos, testUser))
 	require.Error(t, err)
 	require.Empty(t, newID)
-	containedErr, ok := err.(xerrors.ContainedError)
-	require.True(t, ok)
-	err = containedErr.InnerError()
-	_, ok = err.(merrors.InvalidInputError)
+	err = xerrors.InnerError(err)
+	require.NotNil(t, err)
+	_, ok := err.(merrors.InvalidInputError) //nolint:errorlint
 	require.True(t, ok)
 }
 
@@ -729,25 +762,30 @@ func TestRuleSetAddRollupRuleNewRule(t *testing.T) {
 
 	_, err = rs.getRollupRuleByName("foo")
 	require.Equal(t, errRuleNotFound, err)
+	r1, err := pipeline.NewRollupOp(
+		pipeline.GroupByRollupType,
+		"blah",
+		[]string{"a"},
+		aggregation.DefaultID,
+	)
+	require.NoError(t, err)
 
 	view := view.RollupRule{
-		Name:   "foo",
-		Filter: "tag1:value tag2:value",
+		Name:         "foo",
+		Filter:       "tag1:value tag2:value",
+		KeepOriginal: true,
 		Targets: []view.RollupTarget{
 			{
 				Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 					{
-						Type: pipeline.RollupOpType,
-						Rollup: pipeline.RollupOp{
-							NewName:       b("blah"),
-							Tags:          bs("a"),
-							AggregationID: aggregation.DefaultID,
-						},
+						Type:   pipeline.RollupOpType,
+						Rollup: r1,
 					},
 				}),
 				StoragePolicies: policy.StoragePolicies{
 					policy.NewStoragePolicy(time.Minute, xtime.Minute, time.Hour),
 				},
+				ResendEnabled: true,
 			},
 		},
 	}
@@ -768,21 +806,19 @@ func TestRuleSetAddRollupRuleNewRule(t *testing.T) {
 		tombstoned:   false,
 		cutoverNanos: nowNanos + 10,
 		rawFilter:    "tag1:value tag2:value",
+		keepOriginal: true,
 		targets: []rollupTarget{
 			{
 				Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 					{
-						Type: pipeline.RollupOpType,
-						Rollup: pipeline.RollupOp{
-							NewName:       b("blah"),
-							Tags:          bs("a"),
-							AggregationID: aggregation.DefaultID,
-						},
+						Type:   pipeline.RollupOpType,
+						Rollup: r1,
 					},
 				}),
 				StoragePolicies: policy.StoragePolicies{
 					policy.NewStoragePolicy(time.Minute, xtime.Minute, time.Hour),
 				},
+				ResendEnabled: true,
 			},
 		},
 		lastUpdatedBy:      testUser,
@@ -808,7 +844,13 @@ func TestRuleSetAddRollupRuleDuplicateRule(t *testing.T) {
 	r, err := rs.getRollupRuleByID("rollupRule5")
 	require.NoError(t, err)
 	require.NotNil(t, r)
-
+	r1, err := pipeline.NewRollupOp(
+		pipeline.GroupByRollupType,
+		"blah",
+		[]string{"a"},
+		aggregation.DefaultID,
+	)
+	require.NoError(t, err)
 	view := view.RollupRule{
 		Name:   "rollupRule5.snapshot1",
 		Filter: "test:bar",
@@ -816,12 +858,8 @@ func TestRuleSetAddRollupRuleDuplicateRule(t *testing.T) {
 			{
 				Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 					{
-						Type: pipeline.RollupOpType,
-						Rollup: pipeline.RollupOp{
-							NewName:       b("blah"),
-							Tags:          bs("a"),
-							AggregationID: aggregation.DefaultID,
-						},
+						Type:   pipeline.RollupOpType,
+						Rollup: r1,
 					},
 				}),
 				StoragePolicies: policy.StoragePolicies{
@@ -835,10 +873,9 @@ func TestRuleSetAddRollupRuleDuplicateRule(t *testing.T) {
 	newID, err := rs.AddRollupRule(view, helper.NewUpdateMetadata(nowNanos, testUser))
 	require.Error(t, err)
 	require.Empty(t, newID)
-	containedErr, ok := err.(xerrors.ContainedError)
-	require.True(t, ok)
-	err = containedErr.InnerError()
-	_, ok = err.(merrors.InvalidInputError)
+	err = xerrors.InnerError(err)
+	require.NotNil(t, err)
+	_, ok := err.(merrors.InvalidInputError) //nolint:errorlint
 	require.True(t, ok)
 }
 
@@ -863,12 +900,8 @@ func TestRuleSetAddRollupRuleReviveRule(t *testing.T) {
 			{
 				Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 					{
-						Type: pipeline.RollupOpType,
-						Rollup: pipeline.RollupOp{
-							NewName:       b("blah"),
-							Tags:          bs("a"),
-							AggregationID: aggregation.DefaultID,
-						},
+						Type:   pipeline.RollupOpType,
+						Rollup: rr1,
 					},
 				}),
 				StoragePolicies: policy.StoragePolicies{
@@ -899,12 +932,8 @@ func TestRuleSetAddRollupRuleReviveRule(t *testing.T) {
 			{
 				Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 					{
-						Type: pipeline.RollupOpType,
-						Rollup: pipeline.RollupOp{
-							NewName:       b("blah"),
-							Tags:          bs("a"),
-							AggregationID: aggregation.DefaultID,
-						},
+						Type:   pipeline.RollupOpType,
+						Rollup: rr1,
 					},
 				}),
 				StoragePolicies: policy.StoragePolicies{
@@ -935,20 +964,25 @@ func TestRuleSetUpdateRollupRule(t *testing.T) {
 	rr, err := rs.getRollupRuleByID("rollupRule5")
 	require.NoError(t, err)
 
+	rr1, err := pipeline.NewRollupOp(
+		pipeline.GroupByRollupType,
+		"blah",
+		[]string{"a"},
+		aggregation.DefaultID,
+	)
+	require.NoError(t, err)
+
 	view := view.RollupRule{
-		ID:     "rollupRule5",
-		Name:   "rollupRule5.snapshot2",
-		Filter: "test:bar",
+		ID:           "rollupRule5",
+		Name:         "rollupRule5.snapshot2",
+		Filter:       "test:bar",
+		KeepOriginal: true,
 		Targets: []view.RollupTarget{
 			{
 				Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 					{
-						Type: pipeline.RollupOpType,
-						Rollup: pipeline.RollupOp{
-							NewName:       b("blah"),
-							Tags:          bs("a"),
-							AggregationID: aggregation.DefaultID,
-						},
+						Type:   pipeline.RollupOpType,
+						Rollup: rr1,
 					},
 				}),
 				StoragePolicies: policy.StoragePolicies{
@@ -974,16 +1008,13 @@ func TestRuleSetUpdateRollupRule(t *testing.T) {
 		tombstoned:   false,
 		cutoverNanos: nowNanos + 10,
 		rawFilter:    "test:bar",
+		keepOriginal: true,
 		targets: []rollupTarget{
 			{
 				Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 					{
-						Type: pipeline.RollupOpType,
-						Rollup: pipeline.RollupOp{
-							NewName:       b("blah"),
-							Tags:          bs("a"),
-							AggregationID: aggregation.DefaultID,
-						},
+						Type:   pipeline.RollupOpType,
+						Rollup: rr1,
 					},
 				}),
 				StoragePolicies: policy.StoragePolicies{
@@ -1198,10 +1229,9 @@ func TestApplyMappingRuleChangesAddFailure(t *testing.T) {
 	helper := NewRuleSetUpdateHelper(10)
 	err = rs.ApplyRuleSetChanges(changes, helper.NewUpdateMetadata(nowNanos, testUser))
 	require.Error(t, err)
-	containedErr, ok := err.(xerrors.ContainedError)
-	require.True(t, ok)
-	err = containedErr.InnerError()
-	_, ok = err.(merrors.InvalidInputError)
+	err = xerrors.InnerError(err)
+	require.NotNil(t, err)
+	_, ok := err.(merrors.InvalidInputError) //nolint:errorlint
 	require.True(t, ok)
 }
 
@@ -1231,10 +1261,9 @@ func TestApplyRollupRuleChangesAddFailure(t *testing.T) {
 	helper := NewRuleSetUpdateHelper(10)
 	err = rs.ApplyRuleSetChanges(changes, helper.NewUpdateMetadata(nowNanos, testUser))
 	require.Error(t, err)
-	containedErr, ok := err.(xerrors.ContainedError)
-	require.True(t, ok)
-	err = containedErr.InnerError()
-	_, ok = err.(merrors.InvalidInputError)
+	err = xerrors.InnerError(err)
+	require.NotNil(t, err)
+	_, ok := err.(merrors.InvalidInputError) //nolint:errorlint
 	require.True(t, ok)
 }
 
@@ -1261,10 +1290,9 @@ func TestApplyMappingRuleChangesDeleteFailure(t *testing.T) {
 	helper := NewRuleSetUpdateHelper(10)
 	err = rs.ApplyRuleSetChanges(changes, helper.NewUpdateMetadata(nowNanos, testUser))
 	require.Error(t, err)
-	containedErr, ok := err.(xerrors.ContainedError)
-	require.True(t, ok)
-	err = containedErr.InnerError()
-	_, ok = err.(merrors.InvalidInputError)
+	err = xerrors.InnerError(err)
+	require.NotNil(t, err)
+	_, ok := err.(merrors.InvalidInputError) //nolint:errorlint
 	require.True(t, ok)
 }
 
@@ -1291,10 +1319,9 @@ func TestApplyRollupRuleChangesDeleteFailure(t *testing.T) {
 	helper := NewRuleSetUpdateHelper(10)
 	err = rs.ApplyRuleSetChanges(changes, helper.NewUpdateMetadata(nowNanos, testUser))
 	require.Error(t, err)
-	containedErr, ok := err.(xerrors.ContainedError)
-	require.True(t, ok)
-	err = containedErr.InnerError()
-	_, ok = err.(merrors.InvalidInputError)
+	err = xerrors.InnerError(err)
+	require.NotNil(t, err)
+	_, ok := err.(merrors.InvalidInputError) //nolint:errorlint
 	require.True(t, ok)
 }
 
@@ -1426,11 +1453,11 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					Filter:       "mtagName1:mtagValue1",
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: 10 * time.Second.Nanoseconds(),
 								Precision:  time.Second.Nanoseconds(),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: 24 * time.Hour.Nanoseconds(),
 							},
 						},
@@ -1444,29 +1471,29 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					Filter:       "mtagName1:mtagValue1",
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: 10 * time.Second.Nanoseconds(),
 								Precision:  time.Second.Nanoseconds(),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: 6 * time.Hour.Nanoseconds(),
 							},
 						},
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: 5 * time.Minute.Nanoseconds(),
 								Precision:  time.Minute.Nanoseconds(),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: 48 * time.Hour.Nanoseconds(),
 							},
 						},
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: 10 * time.Minute.Nanoseconds(),
 								Precision:  time.Minute.Nanoseconds(),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: 48 * time.Hour.Nanoseconds(),
 							},
 						},
@@ -1480,11 +1507,11 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					Filter:       "mtagName1:mtagValue1",
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: 30 * time.Second.Nanoseconds(),
 								Precision:  time.Second.Nanoseconds(),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: 6 * time.Hour.Nanoseconds(),
 							},
 						},
@@ -1503,11 +1530,11 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					Filter:       "mtagName1:mtagValue1",
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: 10 * time.Second.Nanoseconds(),
 								Precision:  time.Second.Nanoseconds(),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: 12 * time.Hour.Nanoseconds(),
 							},
 						},
@@ -1524,20 +1551,20 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					},
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: 10 * time.Second.Nanoseconds(),
 								Precision:  time.Second.Nanoseconds(),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: 2 * time.Hour.Nanoseconds(),
 							},
 						},
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: int64(time.Minute),
 								Precision:  int64(time.Minute),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: int64(time.Hour),
 							},
 						},
@@ -1554,20 +1581,20 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					},
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: int64(10 * time.Second),
 								Precision:  int64(time.Second),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: int64(2 * time.Hour),
 							},
 						},
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: int64(time.Minute),
 								Precision:  int64(time.Minute),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: int64(time.Hour),
 							},
 						},
@@ -1589,20 +1616,20 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					},
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: int64(10 * time.Second),
 								Precision:  int64(time.Second),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: int64(12 * time.Hour),
 							},
 						},
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: int64(5 * time.Minute),
 								Precision:  int64(time.Minute),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: int64(48 * time.Hour),
 							},
 						},
@@ -1616,20 +1643,20 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					Filter:       "mtagName1:mtagValue1",
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: int64(10 * time.Second),
 								Precision:  int64(time.Second),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: int64(2 * time.Hour),
 							},
 						},
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: int64(time.Minute),
 								Precision:  int64(time.Minute),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: int64(time.Hour),
 							},
 						},
@@ -1651,11 +1678,11 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					},
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: int64(10 * time.Second),
 								Precision:  int64(time.Second),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: int64(24 * time.Hour),
 							},
 						},
@@ -1676,11 +1703,11 @@ func testMappingRulesConfig() []*rulepb.MappingRule {
 					Filter:             "mtagName1:mtagValue1",
 					StoragePolicies: []*policypb.StoragePolicy{
 						&policypb.StoragePolicy{
-							Resolution: &policypb.Resolution{
+							Resolution: policypb.Resolution{
 								WindowSize: int64(10 * time.Second),
 								Precision:  int64(time.Second),
 							},
-							Retention: &policypb.Retention{
+							Retention: policypb.Retention{
 								Period: int64(24 * time.Hour),
 							},
 						},
@@ -1717,17 +1744,18 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(10 * time.Second),
 										Precision:  int64(time.Second),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(24 * time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 				&rulepb.RollupRuleSnapshot{
 					Name:         "rollupRule1.snapshot2",
@@ -1749,35 +1777,36 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(10 * time.Second),
 										Precision:  int64(time.Second),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(6 * time.Hour),
 									},
 								},
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(5 * time.Minute),
 										Precision:  int64(time.Minute),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(48 * time.Hour),
 									},
 								},
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(10 * time.Minute),
 										Precision:  int64(time.Minute),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(48 * time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 				&rulepb.RollupRuleSnapshot{
 					Name:         "rollupRule1.snapshot3",
@@ -1799,17 +1828,18 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(30 * time.Second),
 										Precision:  int64(time.Second),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(6 * time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 			},
 		},
@@ -1836,17 +1866,18 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(10 * time.Second),
 										Precision:  int64(time.Second),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(12 * time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 				&rulepb.RollupRuleSnapshot{
 					Name:         "rollupRule2.snapshot2",
@@ -1868,26 +1899,27 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(10 * time.Second),
 										Precision:  int64(time.Second),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(2 * time.Hour),
 									},
 								},
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(time.Minute),
 										Precision:  int64(time.Minute),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 				&rulepb.RollupRuleSnapshot{
 					Name:         "rollupRule2.snapshot3",
@@ -1909,17 +1941,18 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(time.Minute),
 										Precision:  int64(time.Minute),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 			},
 		},
@@ -1946,29 +1979,29 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(10 * time.Second),
 										Precision:  int64(time.Second),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(12 * time.Hour),
 									},
 								},
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(time.Minute),
 										Precision:  int64(time.Minute),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(24 * time.Hour),
 									},
 								},
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(5 * time.Minute),
 										Precision:  int64(time.Minute),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(48 * time.Hour),
 									},
 								},
@@ -1988,17 +2021,18 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(10 * time.Second),
 										Precision:  int64(time.Second),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(24 * time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 				&rulepb.RollupRuleSnapshot{
 					Name:         "rollupRule3.snapshot2",
@@ -2020,26 +2054,27 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(10 * time.Second),
 										Precision:  int64(time.Second),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(2 * time.Hour),
 									},
 								},
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(time.Minute),
 										Precision:  int64(time.Minute),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 			},
 		},
@@ -2066,17 +2101,18 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(time.Minute),
 										Precision:  int64(time.Minute),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 			},
 		},
@@ -2103,17 +2139,18 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(time.Second),
 										Precision:  int64(time.Second),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(time.Minute),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 			},
 		},
@@ -2140,20 +2177,34 @@ func testRollupRulesConfig() []*rulepb.RollupRule {
 							},
 							StoragePolicies: []*policypb.StoragePolicy{
 								&policypb.StoragePolicy{
-									Resolution: &policypb.Resolution{
+									Resolution: policypb.Resolution{
 										WindowSize: int64(time.Minute),
 										Precision:  int64(time.Minute),
 									},
-									Retention: &policypb.Retention{
+									Retention: policypb.Retention{
 										Period: int64(time.Hour),
 									},
 								},
 							},
 						},
 					},
+					Tags: []*metricpb.Tag{},
 				},
 			},
 		},
+	}
+}
+
+func testMatchOptions() MatchOptions {
+	return MatchOptions{
+		NameAndTagsFn: func(b []byte) ([]byte, []byte, error) {
+			idx := bytes.Index(b, []byte("|"))
+			if idx == -1 {
+				return nil, b, nil
+			}
+			return b[:idx], b[idx+1:], nil
+		},
+		SortedTagIteratorFn: filters.NewMockSortedTagIterator,
 	}
 }
 
@@ -2167,7 +2218,13 @@ func testTagsFilterOptions() filters.TagsFilterOptions {
 			}
 			return b[:idx], b[idx+1:], nil
 		},
-		SortedTagIteratorFn: filters.NewMockSortedTagIterator,
+	}
+}
+
+func testIncludeTagKeys() map[uint64]struct{} {
+	return map[uint64]struct{}{
+		murmur3.Sum64([]byte("includeThisTag1")): {},
+		murmur3.Sum64([]byte("includeThisTag2")): {},
 	}
 }
 
@@ -2210,4 +2267,9 @@ type testMatchInput struct {
 	expireAtNanos         int64
 	forExistingIDResult   metadata.StagedMetadatas
 	forNewRollupIDsResult []IDWithMetadatas
+	keepOriginal          bool
+}
+
+func (t testMatchInput) ID() id.ID {
+	return namespace.NewTestID(t.id, "ns")
 }

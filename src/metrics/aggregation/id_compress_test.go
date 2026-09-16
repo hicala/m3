@@ -23,9 +23,9 @@ package aggregation
 import (
 	"testing"
 
-	"github.com/m3db/m3/src/x/pool"
-
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/x/pool"
 )
 
 func TestIDCompressRoundTrip(t *testing.T) {
@@ -66,7 +66,8 @@ func TestIDDecompressError(t *testing.T) {
 	_, err := decompressor.Decompress([IDLen]uint64{1})
 	require.Error(t, err)
 
-	max, err := compressor.Compress([]Type{Last, Min, Max, Mean, Median, Count, Sum, SumSq, Stdev, P95, P99, P999, P9999})
+	max, err := compressor.Compress(
+		[]Type{Last, Min, Max, Mean, Median, Count, Sum, SumSq, Stdev, P95, P99, P999, P9999, P25, P75})
 	require.NoError(t, err)
 
 	max[0] = max[0] << 1

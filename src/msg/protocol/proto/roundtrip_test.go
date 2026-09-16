@@ -26,10 +26,10 @@ import (
 	"net"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/msg/generated/proto/msgpb"
 	"github.com/m3db/m3/src/x/pool"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestBaseEncodeDecodeRoundTripWithoutPool(t *testing.T) {
@@ -197,7 +197,7 @@ func getBytesPool(bucketSizes int, bucketCaps []int) pool.BytesPool {
 	buckets := make([]pool.Bucket, len(bucketCaps))
 	for i, cap := range bucketCaps {
 		buckets[i] = pool.Bucket{
-			Count:    bucketSizes,
+			Count:    pool.Size(bucketSizes),
 			Capacity: cap,
 		}
 	}

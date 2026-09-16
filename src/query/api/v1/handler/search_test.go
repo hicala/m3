@@ -31,6 +31,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/client"
 	"github.com/m3db/m3/src/query/api/v1/handler/prometheus/handleroptions"
 	"github.com/m3db/m3/src/query/api/v1/options"
@@ -42,10 +46,6 @@ import (
 	"github.com/m3db/m3/src/x/ident"
 	xhttp "github.com/m3db/m3/src/x/net/http"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -98,11 +98,14 @@ func searchServer(t *testing.T) *SearchHandler {
 	mockTaggedIDsIter := generateTagIters(ctrl)
 
 	storage, session := m3.NewStorageAndSession(t, ctrl)
-	session.EXPECT().FetchTaggedIDs(gomock.Any(), gomock.Any(), gomock.Any()).
+	session.EXPECT().FetchTaggedIDs(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(mockTaggedIDsIter, client.FetchResponseMetadata{Exhaustive: false}, nil).AnyTimes()
 
-	builder := handleroptions.NewFetchOptionsBuilder(
-		handleroptions.FetchOptionsBuilderOptions{})
+	builder, err := handleroptions.NewFetchOptionsBuilder(
+		handleroptions.FetchOptionsBuilderOptions{
+			Timeout: 15 * time.Second,
+		})
+	require.NoError(t, err)
 	opts := options.EmptyHandlerOptions().
 		SetStorage(storage).SetFetchOptionsBuilder(builder)
 	search := NewSearchHandler(opts)

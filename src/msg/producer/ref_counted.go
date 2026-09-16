@@ -23,6 +23,7 @@ package producer
 import (
 	"sync"
 
+	"github.com/uber-go/tally"
 	"go.uber.org/atomic"
 )
 
@@ -31,16 +32,14 @@ type OnFinalizeFn func(rm *RefCountedMessage)
 
 // RefCountedMessage is a reference counted message.
 type RefCountedMessage struct {
-	mu sync.RWMutex
 	Message
-
-	size         uint64
-	onFinalizeFn OnFinalizeFn
-
 	// RefCountedMessage must not be copied by value due to RWMutex,
 	// safe to store values here and not just pointers
+	onFinalizeFn        OnFinalizeFn
+	size                uint64
 	refCount            atomic.Int32
 	isDroppedOrConsumed atomic.Bool
+	mu                  sync.RWMutex
 }
 
 // NewRefCountedMessage creates RefCountedMessage.
@@ -52,9 +51,29 @@ func NewRefCountedMessage(m Message, fn OnFinalizeFn) *RefCountedMessage {
 	}
 }
 
+// Not a fan of passing function pointers here,
+// but passing ConsumerServiceWriterMetrics
+// to RefCountedMessage.Accept will cause a cyclical depdenency. ¯\_(ツ)_/¯
+type filterAcceptCounterFn func(metadata FilterFuncMetadata) tally.Counter
+type filterDenyCounterFn func(metadata FilterFuncMetadata) tally.Counter
+
 // Accept returns true if the message can be accepted by the filter.
-func (rm *RefCountedMessage) Accept(fn FilterFunc) bool {
-	return fn(rm.Message)
+func (rm *RefCountedMessage) Accept(
+	fn []FilterFunc,
+	acceptCounterFn filterAcceptCounterFn,
+	denyCounterFn filterDenyCounterFn) bool {
+	if len(fn) == 0 {
+		return false
+	}
+	for _, f := range fn {
+		if !f.Function(rm.Message) {
+			denyCounterFn(f.Metadata).Inc(1)
+			return false
+		}
+		acceptCounterFn(f.Metadata).Inc(1)
+	}
+
+	return true
 }
 
 // IncRef increments the ref count.

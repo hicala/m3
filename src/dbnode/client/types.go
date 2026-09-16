@@ -21,9 +21,14 @@
 package client
 
 import (
+	gocontext "context"
 	"time"
 
-	"github.com/m3db/m3/src/dbnode/clock"
+	"github.com/uber/tchannel-go"
+	"github.com/uber/tchannel-go/thrift"
+
+	"github.com/m3db/m3/src/cluster/shard"
+	"github.com/m3db/m3/src/dbnode/client/circuitbreaker/middleware"
 	"github.com/m3db/m3/src/dbnode/encoding"
 	"github.com/m3db/m3/src/dbnode/generated/thrift/rpc"
 	"github.com/m3db/m3/src/dbnode/namespace"
@@ -32,6 +37,7 @@ import (
 	"github.com/m3db/m3/src/dbnode/storage/bootstrap/result"
 	"github.com/m3db/m3/src/dbnode/storage/index"
 	"github.com/m3db/m3/src/dbnode/topology"
+	"github.com/m3db/m3/src/x/clock"
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/ident"
 	"github.com/m3db/m3/src/x/instrument"
@@ -41,8 +47,6 @@ import (
 	"github.com/m3db/m3/src/x/serialize"
 	xsync "github.com/m3db/m3/src/x/sync"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	tchannel "github.com/uber/tchannel-go"
 )
 
 // Client can create sessions to write and read to a cluster.
@@ -53,6 +57,9 @@ type Client interface {
 	// NewSession creates a new session.
 	NewSession() (Session, error)
 
+	// NewSessionWithOptions creates a new session with the provided Options instead of the ones returned by Options.
+	NewSessionWithOptions(opts Options) (Session, error)
+
 	// DefaultSession creates a default session that gets reused.
 	DefaultSession() (Session, error)
 
@@ -62,26 +69,72 @@ type Client interface {
 
 // Session can write and read to a cluster.
 type Session interface {
+	// WriteClusterAvailability returns whether cluster is available for writes.
+	WriteClusterAvailability() (bool, error)
+
+	// ReadClusterAvailability returns whether cluster is available for reads.
+	ReadClusterAvailability() (bool, error)
+
 	// Write value to the database for an ID.
-	Write(namespace, id ident.ID, t time.Time, value float64, unit xtime.Unit, annotation []byte) error
+	Write(
+		namespace,
+		id ident.ID,
+		t xtime.UnixNano,
+		value float64,
+		unit xtime.Unit,
+		annotation []byte,
+	) error
 
 	// WriteTagged value to the database for an ID and given tags.
-	WriteTagged(namespace, id ident.ID, tags ident.TagIterator, t time.Time, value float64, unit xtime.Unit, annotation []byte) error
+	WriteTagged(
+		namespace,
+		id ident.ID,
+		tags ident.TagIterator,
+		t xtime.UnixNano,
+		value float64,
+		unit xtime.Unit,
+		annotation []byte,
+	) error
 
 	// Fetch values from the database for an ID.
-	Fetch(namespace, id ident.ID, startInclusive, endExclusive time.Time) (encoding.SeriesIterator, error)
+	Fetch(
+		namespace,
+		id ident.ID,
+		startInclusive,
+		endExclusive xtime.UnixNano,
+	) (encoding.SeriesIterator, error)
 
 	// FetchIDs values from the database for a set of IDs.
-	FetchIDs(namespace ident.ID, ids ident.Iterator, startInclusive, endExclusive time.Time) (encoding.SeriesIterators, error)
+	FetchIDs(
+		namespace ident.ID,
+		ids ident.Iterator,
+		startInclusive,
+		endExclusive xtime.UnixNano,
+	) (encoding.SeriesIterators, error)
 
 	// FetchTagged resolves the provided query to known IDs, and fetches the data for them.
-	FetchTagged(namespace ident.ID, q index.Query, opts index.QueryOptions) (encoding.SeriesIterators, FetchResponseMetadata, error)
+	FetchTagged(
+		ctx gocontext.Context,
+		namespace ident.ID,
+		q index.Query,
+		opts index.QueryOptions,
+	) (encoding.SeriesIterators, FetchResponseMetadata, error)
 
 	// FetchTaggedIDs resolves the provided query to known IDs.
-	FetchTaggedIDs(namespace ident.ID, q index.Query, opts index.QueryOptions) (TaggedIDsIterator, FetchResponseMetadata, error)
+	FetchTaggedIDs(
+		ctx gocontext.Context,
+		namespace ident.ID,
+		q index.Query,
+		opts index.QueryOptions,
+	) (TaggedIDsIterator, FetchResponseMetadata, error)
 
 	// Aggregate aggregates values from the database for the given set of constraints.
-	Aggregate(namespace ident.ID, q index.Query, opts index.AggregationOptions) (AggregatedTagsIterator, FetchResponseMetadata, error)
+	Aggregate(
+		ctx gocontext.Context,
+		namespace ident.ID,
+		q index.Query,
+		opts index.AggregationOptions,
+	) (AggregatedTagsIterator, FetchResponseMetadata, error)
 
 	// ShardID returns the given shard for an ID for callers
 	// to easily discern what shard is failing when operations
@@ -104,6 +157,10 @@ type FetchResponseMetadata struct {
 	Responses int
 	// EstimateTotalBytes is an approximation of the total byte size of the response.
 	EstimateTotalBytes int
+	// WaitedIndex counts how many times index querying had to wait for permits.
+	WaitedIndex int
+	// WaitedSeriesRead counts how many times series being read had to wait for permits.
+	WaitedSeriesRead int
 }
 
 // AggregatedTagsIterator iterates over a collection of tag names with optionally
@@ -149,7 +206,7 @@ type TaggedIDsIterator interface {
 type AdminClient interface {
 	Client
 
-	// NewSession creates a new session.
+	// NewAdminSession creates a new admin session.
 	NewAdminSession() (AdminSession, error)
 
 	// DefaultAdminSession creates a default admin session that gets reused.
@@ -177,7 +234,7 @@ type PeerBlocksIter interface {
 
 	// Current returns the metadata, and block data for a single block replica.
 	// These remain valid until Next() is called again.
-	Current() (topology.Host, ident.ID, block.DatabaseBlock)
+	Current() (topology.Host, ident.ID, ident.Tags, block.DatabaseBlock)
 
 	// Err returns any error encountered.
 	Err() error
@@ -207,7 +264,7 @@ type AdminSession interface {
 	FetchBootstrapBlocksFromPeers(
 		namespace namespace.Metadata,
 		shard uint32,
-		start, end time.Time,
+		start, end xtime.UnixNano,
 		opts result.Options,
 	) (result.ShardResult, error)
 
@@ -216,7 +273,7 @@ type AdminSession interface {
 	FetchBootstrapBlocksMetadataFromPeers(
 		namespace ident.ID,
 		shard uint32,
-		start, end time.Time,
+		start, end xtime.UnixNano,
 		result result.Options,
 	) (PeerBlockMetadataIter, error)
 
@@ -225,7 +282,7 @@ type AdminSession interface {
 	FetchBlocksMetadataFromPeers(
 		namespace ident.ID,
 		shard uint32,
-		start, end time.Time,
+		start, end xtime.UnixNano,
 		consistencyLevel topology.ReadConsistencyLevel,
 		result result.Options,
 	) (PeerBlockMetadataIter, error)
@@ -239,6 +296,56 @@ type AdminSession interface {
 		metadatas []block.ReplicaMetadata,
 		opts result.Options,
 	) (PeerBlocksIter, error)
+
+	// BorrowConnections will borrow connection for hosts belonging to a shard.
+	BorrowConnections(
+		shardID uint32,
+		fn WithBorrowConnectionFn,
+		opts BorrowConnectionOptions,
+	) (BorrowConnectionsResult, error)
+
+	// DedicatedConnection will open and health check a new connection to one of the
+	// hosts belonging to a shard. The connection should be used for long running requests.
+	// For normal requests consider using BorrowConnections.
+	DedicatedConnection(
+		shardID uint32,
+		opts DedicatedConnectionOptions,
+	) (rpc.TChanNode, Channel, error)
+}
+
+// BorrowConnectionOptions are options to use when borrowing a connection
+type BorrowConnectionOptions struct {
+	// ContinueOnBorrowError allows skipping hosts that cannot borrow
+	// a connection for.
+	ContinueOnBorrowError bool
+	// ExcludeOrigin will exclude attempting to borrow a connection for
+	// the origin host (i.e. the local host).
+	ExcludeOrigin bool
+}
+
+// BorrowConnectionsResult is a result used when borrowing connections.
+type BorrowConnectionsResult struct {
+	Borrowed int
+}
+
+// WithBorrowConnectionFn is used to do work with a borrowed connection.
+type WithBorrowConnectionFn func(
+	shard shard.Shard,
+	host topology.Host,
+	client rpc.TChanNode,
+	channel Channel,
+) (WithBorrowConnectionResult, error)
+
+// WithBorrowConnectionResult is returned from a borrow connection function.
+type WithBorrowConnectionResult struct {
+	// Break will break the iteration.
+	Break bool
+}
+
+// DedicatedConnectionOptions are options used for getting a dedicated connection.
+type DedicatedConnectionOptions struct {
+	ShardStateFilter      shard.State
+	BootstrappedNodesOnly bool
 }
 
 // Options is a set of client options.
@@ -279,6 +386,18 @@ type Options interface {
 	// LogErrorSampleRate returns the log error sample rate between [0,1.0].
 	LogErrorSampleRate() sampler.Rate
 
+	// SetLogHostWriteErrorSampleRate sets the log error per host sample rate between [0,1.0].
+	SetLogHostWriteErrorSampleRate(value sampler.Rate) Options
+
+	// LogHostWriteErrorSampleRate returns the log error per host sample rate between [0,1.0].
+	LogHostWriteErrorSampleRate() sampler.Rate
+
+	// SetLogHostFetchErrorSampleRate sets the log error per host sample rate between [0,1.0].
+	SetLogHostFetchErrorSampleRate(value sampler.Rate) Options
+
+	// LogHostFetchErrorSampleRate returns the log error per host sample rate between [0,1.0].
+	LogHostFetchErrorSampleRate() sampler.Rate
+
 	// SetTopologyInitializer sets the TopologyInitializer.
 	SetTopologyInitializer(value topology.Initializer) Options
 
@@ -288,7 +407,7 @@ type Options interface {
 	// SetReadConsistencyLevel sets the read consistency level.
 	SetReadConsistencyLevel(value topology.ReadConsistencyLevel) Options
 
-	// topology.ReadConsistencyLevel returns the read consistency level.
+	// ReadConsistencyLevel returns the read consistency level.
 	ReadConsistencyLevel() topology.ReadConsistencyLevel
 
 	// SetWriteConsistencyLevel sets the write consistency level.
@@ -427,6 +546,26 @@ type Options interface {
 	// that are leaving or not towards consistency level calculations.
 	ShardsLeavingCountTowardsConsistency() bool
 
+	// SetShardsLeavingAndInitializingCountTowardsConsistency sets whether to count
+	// the writes to the shards that are leaving and initializing as pair towards consistency.
+	SetShardsLeavingAndInitializingCountTowardsConsistency(value bool) Options
+
+	// ShardsLeavingAndInitializingCountTowardsConsistency returns whether to count the writes to the shards
+	// that are leaving and initializing towards consistency level calculations.
+	ShardsLeavingAndInitializingCountTowardsConsistency() bool
+
+	// SetMiddlewareCircuitbreakerConfig sets the middleware circuit breaker config.
+	SetMiddlewareCircuitbreakerConfig(cfg middleware.Config) Options
+
+	// MiddlewareCircuitbreakerConfig returns the middleware circuit breaker config.
+	MiddlewareCircuitbreakerConfig() middleware.Config
+
+	// SetMiddlewareEnableProvider sets the middleware enable provider.
+	SetMiddlewareEnableProvider(value middleware.EnableProvider) Options
+
+	// MiddlewareEnableProvider returns the middleware enable provider.
+	MiddlewareEnableProvider() middleware.EnableProvider
+
 	// SetTagEncoderOptions sets the TagEncoderOptions.
 	SetTagEncoderOptions(value serialize.TagEncoderOptions) Options
 
@@ -434,10 +573,10 @@ type Options interface {
 	TagEncoderOptions() serialize.TagEncoderOptions
 
 	// SetTagEncoderPoolSize sets the TagEncoderPoolSize.
-	SetTagEncoderPoolSize(value int) Options
+	SetTagEncoderPoolSize(value pool.Size) Options
 
 	// TagEncoderPoolSize returns the TagEncoderPoolSize.
-	TagEncoderPoolSize() int
+	TagEncoderPoolSize() pool.Size
 
 	// SetTagDecoderOptions sets the TagDecoderOptions.
 	SetTagDecoderOptions(value serialize.TagDecoderOptions) Options
@@ -446,10 +585,10 @@ type Options interface {
 	TagDecoderOptions() serialize.TagDecoderOptions
 
 	// SetTagDecoderPoolSize sets the TagDecoderPoolSize.
-	SetTagDecoderPoolSize(value int) Options
+	SetTagDecoderPoolSize(value pool.Size) Options
 
 	// TagDecoderPoolSize returns the TagDecoderPoolSize.
-	TagDecoderPoolSize() int
+	TagDecoderPoolSize() pool.Size
 
 	// SetWriteBatchSize sets the writeBatchSize
 	// NB(r): for a write only application load this should match the host
@@ -470,28 +609,28 @@ type Options interface {
 	FetchBatchSize() int
 
 	// SetWriteOpPoolSize sets the writeOperationPoolSize.
-	SetWriteOpPoolSize(value int) Options
+	SetWriteOpPoolSize(value pool.Size) Options
 
 	// WriteOpPoolSize returns the writeOperationPoolSize.
-	WriteOpPoolSize() int
+	WriteOpPoolSize() pool.Size
 
 	// SetWriteTaggedOpPoolSize sets the writeTaggedOperationPoolSize.
-	SetWriteTaggedOpPoolSize(value int) Options
+	SetWriteTaggedOpPoolSize(value pool.Size) Options
 
 	// WriteTaggedOpPoolSize returns the writeTaggedOperationPoolSize.
-	WriteTaggedOpPoolSize() int
+	WriteTaggedOpPoolSize() pool.Size
 
 	// SetFetchBatchOpPoolSize sets the fetchBatchOpPoolSize.
-	SetFetchBatchOpPoolSize(value int) Options
+	SetFetchBatchOpPoolSize(value pool.Size) Options
 
 	// FetchBatchOpPoolSize returns the fetchBatchOpPoolSize.
-	FetchBatchOpPoolSize() int
+	FetchBatchOpPoolSize() pool.Size
 
 	// SetCheckedBytesWrapperPoolSize sets the checkedBytesWrapperPoolSize.
-	SetCheckedBytesWrapperPoolSize(value int) Options
+	SetCheckedBytesWrapperPoolSize(value pool.Size) Options
 
 	// CheckedBytesWrapperPoolSize returns the checkedBytesWrapperPoolSize.
-	CheckedBytesWrapperPoolSize() int
+	CheckedBytesWrapperPoolSize() pool.Size
 
 	// SetHostQueueOpsFlushSize sets the hostQueueOpsFlushSize.
 	SetHostQueueOpsFlushSize(value int) Options
@@ -511,17 +650,29 @@ type Options interface {
 	// ContextPool returns the contextPool.
 	ContextPool() context.Pool
 
+	// SetCheckedBytesPool sets the checked bytes pool.
+	SetCheckedBytesPool(value pool.CheckedBytesPool) Options
+
+	// CheckedBytesPool returns the checked bytes pool.
+	CheckedBytesPool() pool.CheckedBytesPool
+
 	// SetIdentifierPool sets the identifier pool.
 	SetIdentifierPool(value ident.Pool) Options
 
 	// IdentifierPool returns the identifier pool.
 	IdentifierPool() ident.Pool
 
-	// HostQueueOpsArrayPoolSize sets the hostQueueOpsArrayPoolSize.
-	SetHostQueueOpsArrayPoolSize(value int) Options
+	// SetHostQueueOpsArrayPoolSize sets the hostQueueOpsArrayPoolSize.
+	SetHostQueueOpsArrayPoolSize(value pool.Size) Options
 
 	// HostQueueOpsArrayPoolSize returns the hostQueueOpsArrayPoolSize.
-	HostQueueOpsArrayPoolSize() int
+	HostQueueOpsArrayPoolSize() pool.Size
+
+	// SetHostQueueNewPooledWorkerFn sets the host queue new pooled worker function.
+	SetHostQueueNewPooledWorkerFn(value xsync.NewPooledWorkerFn) Options
+
+	// HostQueueNewPooledWorkerFn sets the host queue new pooled worker function.
+	HostQueueNewPooledWorkerFn() xsync.NewPooledWorkerFn
 
 	// SetHostQueueEmitsHealthStatus sets the hostQueueEmitHealthStatus.
 	SetHostQueueEmitsHealthStatus(value bool) Options
@@ -530,16 +681,10 @@ type Options interface {
 	HostQueueEmitsHealthStatus() bool
 
 	// SetSeriesIteratorPoolSize sets the seriesIteratorPoolSize.
-	SetSeriesIteratorPoolSize(value int) Options
+	SetSeriesIteratorPoolSize(value pool.Size) Options
 
 	// SeriesIteratorPoolSize returns the seriesIteratorPoolSize.
-	SeriesIteratorPoolSize() int
-
-	// SetSeriesIteratorArrayPoolBuckets sets the seriesIteratorArrayPoolBuckets.
-	SetSeriesIteratorArrayPoolBuckets(value []pool.Bucket) Options
-
-	// SeriesIteratorArrayPoolBuckets returns the seriesIteratorArrayPoolBuckets.
-	SeriesIteratorArrayPoolBuckets() []pool.Bucket
+	SeriesIteratorPoolSize() pool.Size
 
 	// SetReaderIteratorAllocate sets the readerIteratorAllocate.
 	SetReaderIteratorAllocate(value encoding.ReaderIteratorAllocate) Options
@@ -601,7 +746,16 @@ type Options interface {
 
 	// NamespaceInitializer returns the NamespaceInitializer.
 	NamespaceInitializer() namespace.Initializer
+
+	// SetThriftContextFn sets the retrier for streaming blocks.
+	SetThriftContextFn(value ThriftContextFn) Options
+
+	// ThriftContextFn returns the retrier for streaming blocks.
+	ThriftContextFn() ThriftContextFn
 }
+
+// ThriftContextFn turns a context into a thrift context for a thrift call.
+type ThriftContextFn func(gocontext.Context) thrift.Context
 
 // AdminOptions is a set of administration client options.
 type AdminOptions interface {
@@ -688,13 +842,20 @@ type hostQueue interface {
 	ConnectionPool() connectionPool
 
 	// BorrowConnection will borrow a connection and execute a user function.
-	BorrowConnection(fn withConnectionFn) error
+	BorrowConnection(fn WithConnectionFn) error
 
 	// Close the host queue, will flush any operations still pending.
 	Close()
 }
 
-type withConnectionFn func(c rpc.TChanNode)
+// WithConnectionFn is a callback for a connection to a host.
+type WithConnectionFn func(client rpc.TChanNode, ch Channel)
+
+// Channel is an interface for tchannel.Channel struct.
+type Channel interface {
+	GetSubChannel(serviceName string, opts ...tchannel.SubChannelOption) *tchannel.SubChannel
+	Close()
+}
 
 type connectionPool interface {
 	// Open starts the connection pool connecting and health checking.
@@ -704,7 +865,7 @@ type connectionPool interface {
 	ConnectionCount() int
 
 	// NextClient gets the next client for use by the connection pool.
-	NextClient() (rpc.TChanNode, error)
+	NextClient() (rpc.TChanNode, Channel, error)
 
 	// Close the connection pool.
 	Close()
@@ -712,7 +873,7 @@ type connectionPool interface {
 
 type peerSource interface {
 	// BorrowConnection will borrow a connection and execute a user function.
-	BorrowConnection(hostID string, fn withConnectionFn) error
+	BorrowConnection(hostID string, fn WithConnectionFn) error
 }
 
 type peer interface {
@@ -720,7 +881,7 @@ type peer interface {
 	Host() topology.Host
 
 	// BorrowConnection will borrow a connection and execute a user function.
-	BorrowConnection(fn withConnectionFn) error
+	BorrowConnection(fn WithConnectionFn) error
 }
 
 type status int
@@ -746,8 +907,10 @@ type op interface {
 	CompletionFn() completionFn
 }
 
-type enqueueDelayedFn func(peersMetadata []receivedBlockMetadata)
-type enqueueDelayedDoneFn func()
+type (
+	enqueueDelayedFn     func(peersMetadata []receivedBlockMetadata)
+	enqueueDelayedDoneFn func()
+)
 
 type enqueueChannel interface {
 	enqueue(peersMetadata []receivedBlockMetadata) error

@@ -22,31 +22,38 @@ package prometheus
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/prometheus/prometheus/model/labels"
+	promstorage "github.com/prometheus/prometheus/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/query/block"
 	"github.com/m3db/m3/src/query/generated/proto/prompb"
 	"github.com/m3db/m3/src/query/models"
 	"github.com/m3db/m3/src/query/storage"
 	"github.com/m3db/m3/src/x/instrument"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/prometheus/prometheus/pkg/labels"
-	promstorage "github.com/prometheus/prometheus/storage"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestSelectWithMetaInContext(t *testing.T) {
 	ctrl := xtest.NewController(t)
 	defer ctrl.Finish()
 
-	var res block.ResultMetadata
+	var resMutex sync.Mutex
+	res := block.NewResultMetadata()
+	resultMetadataReceiveFn := func(m block.ResultMetadata) {
+		resMutex.Lock()
+		defer resMutex.Unlock()
+		res = res.CombineMetadata(m)
+	}
 	ctx := context.Background()
 	ctx = context.WithValue(ctx, FetchOptionsContextKey, storage.NewFetchOptions())
-	ctx = context.WithValue(ctx, BlockResultMetadataKey, &res)
+	ctx = context.WithValue(ctx, BlockResultMetadataFnKey, resultMetadataReceiveFn)
 
 	store := storage.NewMockStorage(ctrl)
 	opts := PrometheusOptions{
@@ -117,8 +124,9 @@ func TestSelectWithMetaInContext(t *testing.T) {
 			}, nil
 		})
 
-	series, warnings, err := q.Select(true, hints, matchers...)
-	assert.NoError(t, err)
+	series := q.Select(true, hints, matchers...)
+	warnings := series.Warnings()
+	assert.NoError(t, series.Err())
 
 	type dp struct {
 		v float64

@@ -21,16 +21,17 @@
 package fst
 
 import (
+	"github.com/m3dbx/vellum"
+
 	sgmt "github.com/m3db/m3/src/m3ninx/index/segment"
 	xerrors "github.com/m3db/m3/src/x/errors"
-
-	"github.com/m3dbx/vellum"
 )
 
 type fstTermsIterOpts struct {
 	seg         *fsSegment
 	fst         *vellum.FST
 	finalizeFST bool
+	fieldsFST   bool
 }
 
 func (o fstTermsIterOpts) Close() error {
@@ -111,6 +112,10 @@ func (f *fstTermsIter) Next() bool {
 
 func (f *fstTermsIter) CurrentOffset() uint64 {
 	return f.currentValue
+}
+
+func (f *fstTermsIter) Empty() bool {
+	return f.Len() == 0
 }
 
 func (f *fstTermsIter) Current() []byte {

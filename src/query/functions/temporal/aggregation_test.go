@@ -24,9 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m3db/m3/src/query/executor/transform"
-
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/query/executor/transform"
 )
 
 var aggregationTestCases = []testCase{
@@ -204,6 +204,42 @@ var aggregationTestCases = []testCase{
 	{
 		name:   "stdvar_over_time all NaNs",
 		opType: StdVarType,
+		vals: [][]float64{
+			{nan, nan, nan, nan, nan, nan, nan, nan, nan, nan},
+			{nan, nan, nan, nan, nan, nan, nan, nan, nan, nan},
+		},
+		expected: [][]float64{
+			{nan, nan, nan, nan, nan, nan, nan, nan, nan, nan},
+			{nan, nan, nan, nan, nan, nan, nan, nan, nan, nan},
+		},
+	},
+	{
+		name:   "last_over_time",
+		opType: LastType,
+		vals: [][]float64{
+			{nan, 1, 2, 3, 4, 0, 1, 2, 3, 4},
+			{5, 6, 7, 8, 9, 5, 6, 7, 8, 9},
+		},
+		expected: [][]float64{
+			{nan, 1, 2, 3, 4, 0, 1, 2, 3, 4},
+			{5, 6, 7, 8, 9, 5, 6, 7, 8, 9},
+		},
+	},
+	{
+		name:   "last_over_time leading NaNs",
+		opType: LastType,
+		vals: [][]float64{
+			{nan, 1, nan, 3, nan, nan, 2, nan, nan, nan},
+			{5, nan, nan, nan, nan, nan, nan, 7, nan, nan},
+		},
+		expected: [][]float64{
+			{nan, 1, nan, 3, nan, nan, 2, nan, nan, nan},
+			{5, nan, nan, nan, nan, nan, nan, 7, nan, nan},
+		},
+	},
+	{
+		name:   "last_over_time all NaNs",
+		opType: LastType,
 		vals: [][]float64{
 			{nan, nan, nan, nan, nan, nan, nan, nan, nan, nan},
 			{nan, nan, nan, nan, nan, nan, nan, nan, nan, nan},

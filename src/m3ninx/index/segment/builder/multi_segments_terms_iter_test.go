@@ -26,16 +26,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/m3ninx/doc"
 	"github.com/m3db/m3/src/m3ninx/index/segment"
 	"github.com/m3db/m3/src/m3ninx/postings"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestTermsIterFromSegmentsDeduplicates(t *testing.T) {
 	segments := []segment.Segment{
-		newTestSegmentWithDocs(t, []doc.Document{
+		newTestSegmentWithDocs(t, []doc.Metadata{
 			{
 				ID: []byte("foo"),
 				Fields: []doc.Field{
@@ -44,7 +44,7 @@ func TestTermsIterFromSegmentsDeduplicates(t *testing.T) {
 				},
 			},
 		}),
-		newTestSegmentWithDocs(t, []doc.Document{
+		newTestSegmentWithDocs(t, []doc.Metadata{
 			{
 				ID: []byte("bar"),
 				Fields: []doc.Field{
@@ -93,7 +93,7 @@ func TestTermsIterFromSegmentsDeduplicates(t *testing.T) {
 
 func assertTermsPostings(
 	t *testing.T,
-	docs []doc.Document,
+	docs []doc.Metadata,
 	iter segment.TermsIterator,
 	expected termPostings,
 ) {
@@ -103,7 +103,7 @@ func assertTermsPostings(
 			termsPostingsString(docs, actual)))
 }
 
-func termsPostingsString(docs []doc.Document, tp termPostings) string {
+func termsPostingsString(docs []doc.Metadata, tp termPostings) string {
 	str := strings.Builder{}
 	for k, ids := range tp {
 		str.WriteString(k)

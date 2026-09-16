@@ -1,4 +1,6 @@
+//go:build big
 // +build big
+
 //
 // Copyright (c) 2017 Uber Technologies, Inc.
 //
@@ -23,7 +25,9 @@
 package commitlog
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"reflect"
@@ -31,6 +35,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/leanovate/gopter"
+	"github.com/leanovate/gopter/gen"
+	"github.com/leanovate/gopter/prop"
+	murmur3 "github.com/m3db/stackmurmur3/v2"
+	"github.com/stretchr/testify/require"
 
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/digest"
@@ -45,16 +55,11 @@ import (
 	"github.com/m3db/m3/src/dbnode/topology"
 	tu "github.com/m3db/m3/src/dbnode/topology/testutil"
 	"github.com/m3db/m3/src/dbnode/ts"
+	"github.com/m3db/m3/src/dbnode/x/xio"
 	"github.com/m3db/m3/src/x/checked"
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/ident"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/leanovate/gopter"
-	"github.com/leanovate/gopter/gen"
-	"github.com/leanovate/gopter/prop"
-	murmur3 "github.com/m3db/stackmurmur3/v2"
-	"github.com/stretchr/testify/require"
 )
 
 const maxShards = 1024
@@ -134,9 +139,11 @@ func TestCommitLogSourcePropCorrectlyBootstrapsFromCommitlog(t *testing.T) {
 						SetStrategy(commitlog.StrategyWriteBehind).
 						SetFlushInterval(time.Millisecond).
 						SetClockOptions(testCommitlogOpts.ClockOptions().SetNowFn(nowFn))
-				bootstrapOpts = testDefaultOpts.SetCommitLogOptions(commitLogOpts)
+				bootstrapOpts = testDefaultOpts.SetCommitLogOptions(commitLogOpts).
+						SetReturnUnfulfilledForCorruptCommitLogFiles(true)
 
-				start = input.currentTime.Truncate(blockSize)
+				start        = xtime.ToUnixNano(input.currentTime.Truncate(blockSize))
+				snapshotTime = xtime.ToUnixNano(input.snapshotTime)
 			)
 
 			writer, err := fs.NewWriter(fsOpts)
@@ -156,8 +163,10 @@ func TestCommitLogSourcePropCorrectlyBootstrapsFromCommitlog(t *testing.T) {
 			}
 
 			for _, writesForSeries := range orderedWritesBySeries {
+				writesForSeries := writesForSeries
 				sort.Slice(writesForSeries, func(i, j int) bool {
-					return writesForSeries[i].datapoint.Timestamp.Before(writesForSeries[j].datapoint.Timestamp)
+					return writesForSeries[i].datapoint.TimestampNanos.
+						Before(writesForSeries[j].datapoint.TimestampNanos)
 				})
 			}
 
@@ -171,7 +180,8 @@ func TestCommitLogSourcePropCorrectlyBootstrapsFromCommitlog(t *testing.T) {
 						compressedWritesByShards[shard] = encodersBySeries
 					}
 
-					encoder := m3tsz.NewEncoder(writesForSeries[0].datapoint.Timestamp, nil, true, encoding.NewOptions())
+					encoder := m3tsz.NewEncoder(writesForSeries[0].datapoint.TimestampNanos,
+						nil, true, encoding.NewOptions())
 					for _, value := range writesForSeries {
 						// Only include datapoints that are before or during the snapshot time to ensure that we
 						// properly bootstrap from both snapshot files and commit logs and merge them together.
@@ -187,17 +197,11 @@ func TestCommitLogSourcePropCorrectlyBootstrapsFromCommitlog(t *testing.T) {
 						}
 					}
 
-					ctx := context.NewContext()
+					ctx := context.NewBackground()
 					reader, ok := encoder.Stream(ctx)
 					if ok {
-						seg, err := reader.Segment()
-						if err != nil {
-							return false, err
-						}
-
-						bytes := make([]byte, seg.Len())
-						_, err = reader.Read(bytes)
-						if err != nil {
+						bytes, err := xio.ToBytes(reader)
+						if !errors.Is(err, io.EOF) {
 							return false, err
 						}
 						encodersBySeries[seriesID] = bytes
@@ -218,7 +222,7 @@ func TestCommitLogSourcePropCorrectlyBootstrapsFromCommitlog(t *testing.T) {
 						BlockSize:   blockSize,
 						FileSetType: persist.FileSetSnapshotType,
 						Snapshot: fs.DataWriterSnapshotOptions{
-							SnapshotTime: input.snapshotTime,
+							SnapshotTime: snapshotTime,
 						},
 					})
 
@@ -278,7 +282,7 @@ func TestCommitLogSourcePropCorrectlyBootstrapsFromCommitlog(t *testing.T) {
 					currentTime = write.arrivedAt
 					lock.Unlock()
 
-					err := log.Write(context.NewContext(), write.series, write.datapoint, write.unit, write.annotation)
+					err := log.Write(context.NewBackground(), write.series, write.datapoint, write.unit, write.annotation)
 					if err != nil {
 						return false, err
 					}
@@ -332,7 +336,7 @@ func TestCommitLogSourcePropCorrectlyBootstrapsFromCommitlog(t *testing.T) {
 			}
 
 			// Determine time range to bootstrap
-			end := input.currentTime.Add(blockSize)
+			end := xtime.ToUnixNano(input.currentTime.Add(blockSize))
 			ranges := xtime.NewRanges(xtime.Range{Start: start, End: end})
 
 			// Determine which shards we need to bootstrap (based on the randomly
@@ -372,7 +376,7 @@ func TestCommitLogSourcePropCorrectlyBootstrapsFromCommitlog(t *testing.T) {
 			runOpts := testDefaultRunOpts.SetInitialTopologyState(initialTopoState)
 			tester := bootstrap.BuildNamespacesTesterWithFilesystemOptions(t, runOpts, shardTimeRanges, fsOpts, nsMeta)
 
-			ctx := context.NewContext()
+			ctx := context.NewBackground()
 			defer ctx.Close()
 
 			bootstrapResults, err := source.Bootstrap(ctx, tester.Namespaces, tester.Cache)
@@ -384,7 +388,7 @@ func TestCommitLogSourcePropCorrectlyBootstrapsFromCommitlog(t *testing.T) {
 			values := testValues{}
 			for _, write := range input.writes {
 				values = append(values, testValue{
-					write.series, write.datapoint.Timestamp,
+					write.series, write.datapoint.TimestampNanos,
 					write.datapoint.Value, write.unit, write.annotation})
 			}
 
@@ -623,8 +627,8 @@ func genWrite(t *testing.T, start time.Time, bufferPast, bufferFuture time.Durat
 			},
 			tags: tags,
 			datapoint: ts.Datapoint{
-				Timestamp: tm,
-				Value:     v,
+				TimestampNanos: xtime.ToUnixNano(tm),
+				Value:          v,
 			},
 			unit: xtime.Nanosecond,
 		}

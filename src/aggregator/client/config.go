@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/uber-go/tally"
+
 	"github.com/m3db/m3/src/aggregator/sharding"
 	m3clusterclient "github.com/m3db/m3/src/cluster/client"
 	"github.com/m3db/m3/src/cluster/kv"
@@ -34,30 +36,29 @@ import (
 	"github.com/m3db/m3/src/x/clock"
 	"github.com/m3db/m3/src/x/instrument"
 	xio "github.com/m3db/m3/src/x/io"
+	"github.com/m3db/m3/src/x/net"
 	"github.com/m3db/m3/src/x/pool"
 	"github.com/m3db/m3/src/x/retry"
-
-	"github.com/uber-go/tally"
+	xtls "github.com/m3db/m3/src/x/tls"
 )
 
-var (
-	errNoM3MsgOptions = errors.New("m3msg aggregator client: missing m3msg options")
-)
+var errNoM3MsgOptions = errors.New("m3msg aggregator client: missing m3msg options")
 
 // Configuration contains client configuration.
 type Configuration struct {
 	Type                       AggregatorClientType            `yaml:"type"`
 	M3Msg                      *M3MsgConfiguration             `yaml:"m3msg"`
 	PlacementKV                *kv.OverrideConfiguration       `yaml:"placementKV"`
-	PlacementWatcher           *placement.WatcherConfiguration `yaml:"placementWatcher"`
+	Watcher                    *placement.WatcherConfiguration `yaml:"placementWatcher"`
 	HashType                   *sharding.HashType              `yaml:"hashType"`
 	ShardCutoverWarmupDuration *time.Duration                  `yaml:"shardCutoverWarmupDuration"`
 	ShardCutoffLingerDuration  *time.Duration                  `yaml:"shardCutoffLingerDuration"`
 	Encoder                    EncoderConfiguration            `yaml:"encoder"`
-	FlushSize                  int                             `yaml:"flushSize"`
+	FlushSize                  int                             `yaml:"flushSize,omitempty"` // FlushSize is deprecated
+	FlushWorkerCount           int                             `yaml:"flushWorkerCount"`
+	ForceFlushEvery            time.Duration                   `yaml:"forceFlushEvery"`
 	MaxBatchSize               int                             `yaml:"maxBatchSize"`
 	MaxTimerBatchSize          int                             `yaml:"maxTimerBatchSize"`
-	BatchFlushDeadline         time.Duration                   `yaml:"batchFlushDeadline"`
 	QueueSize                  int                             `yaml:"queueSize"`
 	QueueDropType              *DropType                       `yaml:"queueDropType"`
 	Connection                 ConnectionConfiguration         `yaml:"connection"`
@@ -84,7 +85,7 @@ func (c *Configuration) NewClient(
 	instrumentOpts instrument.Options,
 	rwOpts xio.Options,
 ) (Client, error) {
-	opts, err := c.newClientOptions(kvClient, clockOpts, instrumentOpts, rwOpts)
+	opts, err := c.NewClientOptions(kvClient, clockOpts, instrumentOpts, rwOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -93,11 +94,13 @@ func (c *Configuration) NewClient(
 }
 
 var (
-	errLegacyClientNoPlacementKVConfig      = errors.New("no placement KV config set")
-	errLegacyClientNoPlacementWatcherConfig = errors.New("no placement watcher config set")
+	errLegacyClientNoPlacementKVConfig = errors.New("no placement KV config set")
+	errLegacyClientNoWatcherConfig     = errors.New("no placement watcher config set")
 )
 
-func (c *Configuration) newClientOptions(
+// NewClientOptions creates Options that can be used to
+// create a New Aggregator Client.
+func (c *Configuration) NewClientOptions(
 	kvClient m3clusterclient.Client,
 	clockOpts clock.Options,
 	instrumentOpts instrument.Options,
@@ -133,9 +136,9 @@ func (c *Configuration) newClientOptions(
 			return nil, errLegacyClientNoPlacementKVConfig
 		}
 
-		placementWatcher := c.PlacementWatcher
+		placementWatcher := c.Watcher
 		if placementWatcher == nil {
-			return nil, errLegacyClientNoPlacementWatcherConfig
+			return nil, errLegacyClientNoWatcherConfig
 		}
 
 		scope := instrumentOpts.MetricsScope()
@@ -166,7 +169,7 @@ func (c *Configuration) newClientOptions(
 			return nil, err
 		}
 
-		opts = opts.SetStagedPlacementWatcherOptions(watcherOpts).
+		opts = opts.SetWatcherOptions(watcherOpts).
 			SetShardFn(shardFn).
 			SetEncoderOptions(encoderOpts).
 			SetConnectionOptions(connectionOpts)
@@ -177,17 +180,17 @@ func (c *Configuration) newClientOptions(
 		if c.ShardCutoffLingerDuration != nil {
 			opts = opts.SetShardCutoffLingerDuration(*c.ShardCutoffLingerDuration)
 		}
-		if c.FlushSize != 0 {
-			opts = opts.SetFlushSize(c.FlushSize)
+		if c.FlushWorkerCount != 0 {
+			opts = opts.SetFlushWorkerCount(c.FlushWorkerCount)
+		}
+		if c.ForceFlushEvery != 0 {
+			opts = opts.SetForceFlushEvery(c.ForceFlushEvery)
 		}
 		if c.MaxBatchSize != 0 {
 			opts = opts.SetMaxBatchSize(c.MaxBatchSize)
 		}
 		if c.MaxTimerBatchSize != 0 {
 			opts = opts.SetMaxTimerBatchSize(c.MaxTimerBatchSize)
-		}
-		if c.BatchFlushDeadline != 0 {
-			opts = opts.SetBatchFlushDeadline(c.BatchFlushDeadline)
 		}
 		if c.QueueSize != 0 {
 			opts = opts.SetInstanceQueueSize(c.QueueSize)
@@ -206,16 +209,43 @@ func (c *Configuration) newClientOptions(
 	return opts, nil
 }
 
+// TLSConfiguration contains the TLS configuration
+type TLSConfiguration struct {
+	Enabled               bool          `yaml:"enabled"`
+	InsecureSkipVerify    bool          `yaml:"insecureSkipVerify"`
+	TLSHandshakeOnConnect bool          `yaml:"tlsHandshakeOnConnect"`
+	ServerName            string        `yaml:"serverName"`
+	CAFile                string        `yaml:"caFile"`
+	CertFile              string        `yaml:"certFile"`
+	KeyFile               string        `yaml:"keyFile"`
+	CertificatesTTL       time.Duration `yaml:"certificatesTTL"`
+}
+
+// NewTLSOptions creates new TLS options
+func (c *TLSConfiguration) NewTLSOptions() xtls.Options {
+	return xtls.NewOptions().
+		SetClientEnabled(c.Enabled).
+		SetInsecureSkipVerify(c.InsecureSkipVerify).
+		SetServerName(c.ServerName).
+		SetCAFile(c.CAFile).
+		SetCertFile(c.CertFile).
+		SetKeyFile(c.KeyFile).
+		SetTLSHandshakeOnConnect(c.TLSHandshakeOnConnect)
+}
+
 // ConnectionConfiguration contains the connection configuration.
 type ConnectionConfiguration struct {
 	ConnectionTimeout            time.Duration        `yaml:"connectionTimeout"`
 	ConnectionKeepAlive          *bool                `yaml:"connectionKeepAlive"`
+	ReadTimeout                  time.Duration        `yaml:"readTimeout"`
 	WriteTimeout                 time.Duration        `yaml:"writeTimeout"`
 	InitReconnectThreshold       int                  `yaml:"initReconnectThreshold"`
 	MaxReconnectThreshold        int                  `yaml:"maxReconnectThreshold"`
 	ReconnectThresholdMultiplier int                  `yaml:"reconnectThresholdMultiplier"`
 	MaxReconnectDuration         *time.Duration       `yaml:"maxReconnectDuration"`
 	WriteRetries                 *retry.Configuration `yaml:"writeRetries"`
+	TLS                          *TLSConfiguration    `yaml:"tls"`
+	ContextDialerFn              net.ContextDialerFn  `yaml:"-"`
 }
 
 // NewConnectionOptions creates new connection options.
@@ -226,6 +256,9 @@ func (c *ConnectionConfiguration) NewConnectionOptions(scope tally.Scope) Connec
 	}
 	if c.ConnectionKeepAlive != nil {
 		opts = opts.SetConnectionKeepAlive(*c.ConnectionKeepAlive)
+	}
+	if c.ReadTimeout != 0 {
+		opts = opts.SetReadTimeout(c.ReadTimeout)
 	}
 	if c.WriteTimeout != 0 {
 		opts = opts.SetWriteTimeout(c.WriteTimeout)
@@ -245,6 +278,12 @@ func (c *ConnectionConfiguration) NewConnectionOptions(scope tally.Scope) Connec
 	if c.WriteRetries != nil {
 		retryOpts := c.WriteRetries.NewOptions(scope)
 		opts = opts.SetWriteRetryOptions(retryOpts)
+	}
+	if c.TLS != nil {
+		opts = opts.SetTLSOptions(c.TLS.NewTLSOptions())
+	}
+	if c.ContextDialerFn != nil {
+		opts = opts.SetContextDialer(c.ContextDialerFn)
 	}
 	return opts
 }

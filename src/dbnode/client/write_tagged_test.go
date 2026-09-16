@@ -25,15 +25,16 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/m3db/m3/src/cluster/shard"
-	tterrors "github.com/m3db/m3/src/dbnode/network/server/tchannelthrift/errors"
-	"github.com/m3db/m3/src/dbnode/topology"
-	xerrors "github.com/m3db/m3/src/x/errors"
-	"github.com/m3db/m3/src/x/ident"
-
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/cluster/shard"
+	tterrors "github.com/m3db/m3/src/dbnode/network/server/tchannelthrift/errors"
+	"github.com/m3db/m3/src/dbnode/topology"
+	"github.com/m3db/m3/src/x/checked"
+	xerrors "github.com/m3db/m3/src/x/errors"
+	"github.com/m3db/m3/src/x/ident"
 )
 
 // shard state tests
@@ -136,6 +137,13 @@ func getWriteTaggedState(ctrl *gomock.Controller, s *session, w writeTaggedStub)
 	wState.nsID = w.ns
 	wState.tsID = w.id
 	wState.tagEncoder = s.pools.tagEncoder.Get()
+	var clonedAnnotation checked.Bytes
+	if len(w.annotation) > 0 {
+		clonedAnnotation = s.pools.checkedBytes.Get(len(w.annotation))
+		clonedAnnotation.IncRef()
+		clonedAnnotation.AppendAll(w.annotation)
+	}
+	wState.annotation = clonedAnnotation
 	return wState
 }
 

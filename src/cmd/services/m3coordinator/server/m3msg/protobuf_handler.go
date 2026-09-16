@@ -24,14 +24,14 @@ import (
 	"context"
 	"sync"
 
+	"github.com/uber-go/tally"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/metrics/encoding/protobuf"
 	"github.com/m3db/m3/src/metrics/policy"
 	"github.com/m3db/m3/src/msg/consumer"
 	"github.com/m3db/m3/src/x/instrument"
 	"github.com/m3db/m3/src/x/pool"
-
-	"github.com/uber-go/tally"
-	"go.uber.org/zap"
 )
 
 // Options for the ingest handler.
@@ -43,26 +43,20 @@ type Options struct {
 }
 
 type handlerMetrics struct {
-	messageReadError             tally.Counter
 	metricAccepted               tally.Counter
 	droppedMetricBlackholePolicy tally.Counter
 	droppedMetricDecodeError     tally.Counter
-	droppedMetricDecodeMalformed tally.Counter
 }
 
 func newHandlerMetrics(scope tally.Scope) handlerMetrics {
 	messageScope := scope.SubScope("metric")
 	return handlerMetrics{
-		messageReadError: scope.Counter("message-read-error"),
-		metricAccepted:   messageScope.Counter("accepted"),
+		metricAccepted: messageScope.Counter("accepted"),
 		droppedMetricDecodeError: messageScope.Tagged(map[string]string{
 			"reason": "decode-error",
 		}).Counter("dropped"),
 		droppedMetricBlackholePolicy: messageScope.Tagged(map[string]string{
 			"reason": "blackhole-policy",
-		}).Counter("dropped"),
-		droppedMetricDecodeMalformed: messageScope.Tagged(map[string]string{
-			"reason": "decode-malformed",
 		}).Counter("dropped"),
 	}
 }
@@ -111,18 +105,11 @@ func (h *pbHandler) Process(msg consumer.Message) {
 		h.m.droppedMetricDecodeError.Inc(1)
 		return
 	}
-	sp, err := dec.StoragePolicy()
-	if err != nil {
-		h.logger.Error("invalid storage policy", zap.Error(err))
-		h.m.droppedMetricDecodeMalformed.Inc(1)
-		return
-	}
-
 	h.m.metricAccepted.Inc(1)
 
 	h.wg.Add(1)
 	r := NewProtobufCallback(msg, dec, h.wg)
-
+	sp := dec.StoragePolicy()
 	// If storage policy is blackholed, ack the message immediately and don't
 	// bother passing down the write path.
 	for _, blackholeSp := range h.blackholePolicies {
@@ -133,7 +120,7 @@ func (h *pbHandler) Process(msg consumer.Message) {
 		}
 	}
 
-	h.writeFn(h.ctx, dec.ID(), dec.TimeNanos(), dec.EncodeNanos(), dec.Value(), sp, r)
+	h.writeFn(h.ctx, dec.ID(), dec.TimeNanos(), dec.EncodeNanos(), dec.Value(), dec.Annotation(), sp, r)
 }
 
 func (h *pbHandler) Close() { h.wg.Wait() }

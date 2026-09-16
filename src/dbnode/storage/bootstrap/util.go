@@ -27,7 +27,10 @@ import (
 	"math"
 	"sort"
 	"sync"
-	"time"
+
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/m3db/m3/src/dbnode/encoding"
 	"github.com/m3db/m3/src/dbnode/encoding/m3tsz"
@@ -42,10 +45,6 @@ import (
 	"github.com/m3db/m3/src/x/pool"
 	xtest "github.com/m3db/m3/src/x/test"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // ReadersForID is a slice of readers that share a series ID.
@@ -139,7 +138,7 @@ func (m DecodedBlockMap) VerifyEquals(other DecodedBlockMap) error {
 // their start times and tags.
 type ReaderAtTime struct {
 	// Start is the block start time.
-	Start time.Time
+	Start xtime.UnixNano
 	// Reader is the block segment reader.
 	Reader xio.SegmentReader
 	// Tags is the list of tags in a basic string map format.
@@ -240,7 +239,10 @@ func (a *TestDataAccumulator) checkoutSeriesWithLock(
 	mockSeries.EXPECT().
 		LoadBlock(gomock.Any(), gomock.Any()).
 		DoAndReturn(func(bl block.DatabaseBlock, _ series.WriteType) error {
-			reader, err := bl.Stream(context.NewContext())
+			a.Lock()
+			defer a.Unlock()
+
+			reader, err := bl.Stream(context.NewBackground())
 			if err != nil {
 				streamErr = err
 				return err
@@ -262,7 +264,7 @@ func (a *TestDataAccumulator) checkoutSeriesWithLock(
 		DoAndReturn(
 			func(
 				_ context.Context,
-				ts time.Time,
+				ts xtime.UnixNano,
 				val float64,
 				unit xtime.Unit,
 				annotation []byte,
@@ -281,14 +283,25 @@ func (a *TestDataAccumulator) checkoutSeriesWithLock(
 			}).AnyTimes()
 
 	result := CheckoutSeriesResult{
-		Shard:       shardID,
-		Series:      mockSeries,
-		UniqueIndex: uint64(len(a.results) + 1),
+		Shard:    shardID,
+		Resolver: &seriesStaticResolver{series: mockSeries},
 	}
 
 	a.results[stringID] = result
 	return result, true, streamErr
 }
+
+var _ SeriesRefResolver = (*seriesStaticResolver)(nil)
+
+type seriesStaticResolver struct {
+	series SeriesRef
+}
+
+func (r *seriesStaticResolver) SeriesRef() (SeriesRef, error) {
+	return r.series, nil
+}
+
+func (r *seriesStaticResolver) ReleaseRef() {}
 
 // Release is a no-op on the test accumulator.
 func (a *TestDataAccumulator) Release() {}
@@ -316,12 +329,7 @@ type NamespacesTester struct {
 
 func buildDefaultIterPool() encoding.MultiReaderIteratorPool {
 	iterPool := encoding.NewMultiReaderIteratorPool(pool.NewObjectPoolOptions())
-	iterPool.Init(
-		func(r io.Reader, _ namespace.SchemaDescr) encoding.ReaderIterator {
-			return m3tsz.NewReaderIterator(r,
-				m3tsz.DefaultIntOptimizationEnabled,
-				encoding.NewOptions())
-		})
+	iterPool.Init(m3tsz.DefaultReaderIteratorAllocFn(encoding.NewOptions()))
 	return iterPool
 }
 
@@ -572,7 +580,7 @@ func (nt *NamespacesTester) ResultForNamespace(id ident.ID) NamespaceResult {
 // TestBootstrapWith bootstraps the current Namespaces with the
 // provided bootstrapper.
 func (nt *NamespacesTester) TestBootstrapWith(b Bootstrapper) {
-	ctx := context.NewContext()
+	ctx := context.NewBackground()
 	defer ctx.Close()
 	res, err := b.Bootstrap(ctx, nt.Namespaces, nt.Cache)
 	assert.NoError(nt.t, err)
@@ -582,7 +590,7 @@ func (nt *NamespacesTester) TestBootstrapWith(b Bootstrapper) {
 // TestReadWith reads the current Namespaces with the
 // provided bootstrap source.
 func (nt *NamespacesTester) TestReadWith(s Source) {
-	ctx := context.NewContext()
+	ctx := context.NewBackground()
 	defer ctx.Close()
 	res, err := s.Read(ctx, nt.Namespaces, nt.Cache)
 	require.NoError(nt.t, err)
@@ -664,6 +672,15 @@ func (nt *NamespacesTester) TestUnfulfilledForNamespace(
 		actual := ns.IndexResult.Unfulfilled()
 		require.NoError(nt.t, validateShardTimeRanges(actual, exIdx), "index")
 	}
+}
+
+// TestIndexResultForNamespace verifies index result.
+func (nt *NamespacesTester) TestIndexResultForNamespace(
+	md namespace.Metadata,
+	expected result.IndexBootstrapResult,
+) {
+	ns := nt.ResultForNamespace(md.ID())
+	require.Equal(nt.t, expected, ns.IndexResult)
 }
 
 // TestUnfulfilledForNamespaceIsEmpty ensures the given namespace has an empty

@@ -24,6 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/metrics/aggregation"
 	"github.com/m3db/m3/src/metrics/generated/proto/aggregationpb"
 	"github.com/m3db/m3/src/metrics/generated/proto/metricpb"
@@ -37,8 +40,6 @@ import (
 	"github.com/m3db/m3/src/metrics/policy"
 	"github.com/m3db/m3/src/metrics/transformation"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -60,6 +61,7 @@ var (
 	testMetricWithStoragePolicy = MetricWithStoragePolicy{
 		Metric:        testMetric1,
 		StoragePolicy: policy.NewStoragePolicy(10*time.Second, xtime.Second, 6*time.Hour),
+		RoutingPolicy: policy.NewRoutingPolicy(1),
 	}
 	testForwardedMetric1 = ForwardedMetric{
 		Type:      metric.CounterType,
@@ -90,6 +92,7 @@ var (
 		}),
 		SourceID:          1234,
 		NumForwardedTimes: 3,
+		RoutingPolicy:     policy.NewRoutingPolicy(3),
 	}
 	testForwardMetadata2 = metadata.ForwardMetadata{
 		AggregationID: aggregation.MustCompressTypes(aggregation.Sum),
@@ -111,6 +114,7 @@ var (
 		}),
 		SourceID:          897,
 		NumForwardedTimes: 2,
+		RoutingPolicy:     policy.NewRoutingPolicy(2),
 	}
 	testBadForwardMetadata = metadata.ForwardMetadata{
 		StoragePolicy: policy.NewStoragePolicy(10*time.Second, xtime.Unit(101), 6*time.Hour),
@@ -142,11 +146,11 @@ var (
 	testForwardMetadata1Proto = metricpb.ForwardMetadata{
 		AggregationId: aggregationpb.AggregationID{Id: 0},
 		StoragePolicy: policypb.StoragePolicy{
-			Resolution: &policypb.Resolution{
+			Resolution: policypb.Resolution{
 				WindowSize: time.Minute.Nanoseconds(),
 				Precision:  time.Minute.Nanoseconds(),
 			},
-			Retention: &policypb.Retention{
+			Retention: policypb.Retention{
 				Period: (12 * time.Hour).Nanoseconds(),
 			},
 		},
@@ -154,7 +158,7 @@ var (
 			Ops: []pipelinepb.AppliedPipelineOp{
 				{
 					Type: pipelinepb.AppliedPipelineOp_ROLLUP,
-					Rollup: &pipelinepb.AppliedRollupOp{
+					Rollup: pipelinepb.AppliedRollupOp{
 						Id:            []byte("foo"),
 						AggregationId: aggregationpb.AggregationID{Id: aggregation.MustCompressTypes(aggregation.Count)[0]},
 					},
@@ -163,15 +167,18 @@ var (
 		},
 		SourceId:          1234,
 		NumForwardedTimes: 3,
+		RoutingPolicy: policypb.RoutingPolicy{
+			TrafficTypes: 3,
+		},
 	}
 	testForwardMetadata2Proto = metricpb.ForwardMetadata{
 		AggregationId: aggregationpb.AggregationID{Id: aggregation.MustCompressTypes(aggregation.Sum)[0]},
 		StoragePolicy: policypb.StoragePolicy{
-			Resolution: &policypb.Resolution{
+			Resolution: policypb.Resolution{
 				WindowSize: 10 * time.Second.Nanoseconds(),
 				Precision:  time.Second.Nanoseconds(),
 			},
-			Retention: &policypb.Retention{
+			Retention: policypb.Retention{
 				Period: (6 * time.Hour).Nanoseconds(),
 			},
 		},
@@ -179,13 +186,13 @@ var (
 			Ops: []pipelinepb.AppliedPipelineOp{
 				{
 					Type: pipelinepb.AppliedPipelineOp_TRANSFORMATION,
-					Transformation: &pipelinepb.TransformationOp{
+					Transformation: pipelinepb.TransformationOp{
 						Type: transformationpb.TransformationType_ABSOLUTE,
 					},
 				},
 				{
 					Type: pipelinepb.AppliedPipelineOp_ROLLUP,
-					Rollup: &pipelinepb.AppliedRollupOp{
+					Rollup: pipelinepb.AppliedRollupOp{
 						Id:            []byte("bar"),
 						AggregationId: aggregationpb.AggregationID{Id: aggregation.MustCompressTypes(aggregation.Last, aggregation.Sum)[0]},
 					},
@@ -194,6 +201,9 @@ var (
 		},
 		SourceId:          897,
 		NumForwardedTimes: 2,
+		RoutingPolicy: policypb.RoutingPolicy{
+			TrafficTypes: 2,
+		},
 	}
 	testBadMetricProto = metricpb.TimedMetric{
 		Type: 999,
@@ -365,13 +375,18 @@ func TestForwardedMetricWithMetadataFromProto(t *testing.T) {
 	}
 
 	var res ForwardedMetricWithMetadata
+	comparer := cmp.Comparer(spComparer)
 	for _, input := range inputs {
 		require.NoError(t, res.FromProto(&input.data))
 		expected := ForwardedMetricWithMetadata{
 			ForwardedMetric: input.expectedMetric,
 			ForwardMetadata: input.expectedMetadata,
 		}
-		require.Equal(t, expected, res)
+
+		if !cmp.Equal(expected, res, comparer) {
+			t.Log(cmp.Diff(expected, res, comparer))
+			t.Fail()
+		}
 	}
 }
 
@@ -416,6 +431,7 @@ func TestForwardedMetricWithMetadataRoundtrip(t *testing.T) {
 		res ForwardedMetricWithMetadata
 		pb  metricpb.ForwardedMetricWithMetadata
 	)
+	comparer := cmp.Comparer(spComparer)
 	for _, input := range inputs {
 		data := ForwardedMetricWithMetadata{
 			ForwardedMetric: input.metric,
@@ -423,6 +439,13 @@ func TestForwardedMetricWithMetadataRoundtrip(t *testing.T) {
 		}
 		require.NoError(t, data.ToProto(&pb))
 		require.NoError(t, res.FromProto(&pb))
-		require.Equal(t, data, res)
+		if !cmp.Equal(data, res, comparer) {
+			t.Log(cmp.Diff(data, res, comparer))
+			t.Fail()
+		}
 	}
+}
+
+func spComparer(x, y policy.StoragePolicy) bool {
+	return x.Equivalent(y)
 }

@@ -24,11 +24,13 @@ import (
 	"fmt"
 	"time"
 
+	murmur3 "github.com/m3db/stackmurmur3/v2"
+
 	"github.com/m3db/m3/src/cluster/client"
 	"github.com/m3db/m3/src/cluster/kv"
 	"github.com/m3db/m3/src/metrics/filters"
 	"github.com/m3db/m3/src/metrics/matcher/cache"
-	"github.com/m3db/m3/src/metrics/metric/id"
+	"github.com/m3db/m3/src/metrics/matcher/namespace"
 	"github.com/m3db/m3/src/metrics/metric/id/m3"
 	"github.com/m3db/m3/src/metrics/rules"
 	"github.com/m3db/m3/src/x/clock"
@@ -45,6 +47,7 @@ type Configuration struct {
 	NamespaceTag          string                       `yaml:"namespaceTag" validate:"nonzero"`
 	DefaultNamespace      string                       `yaml:"defaultNamespace" validate:"nonzero"`
 	NameTagKey            string                       `yaml:"nameTagKey" validate:"nonzero"`
+	IncludeTagKeys        []string                     `yaml:"includeTagKeys"`
 	MatchRangePast        *time.Duration               `yaml:"matchRangePast"`
 	SortedTagIteratorPool pool.ObjectPoolConfiguration `yaml:"sortedTagIteratorPool"`
 }
@@ -97,31 +100,22 @@ func (cfg *Configuration) NewOptions(
 	}
 
 	// Configure rules options.
-	scope := instrumentOpts.MetricsScope().SubScope("sorted-tag-iterator-pool")
-	poolOpts := cfg.SortedTagIteratorPool.NewObjectPoolOptions(instrumentOpts.SetMetricsScope(scope))
-	sortedTagIteratorPool := id.NewSortedTagIteratorPool(poolOpts)
-	sortedTagIteratorPool.Init(func() id.SortedTagIterator {
-		return m3.NewPooledSortedTagIterator(nil, sortedTagIteratorPool)
-	})
-	sortedTagIteratorFn := func(tagPairs []byte) id.SortedTagIterator {
-		it := sortedTagIteratorPool.Get()
-		it.Reset(tagPairs)
-		return it
-	}
 	tagsFilterOptions := filters.TagsFilterOptions{
-		NameTagKey:          []byte(cfg.NameTagKey),
-		NameAndTagsFn:       m3.NameAndTags,
-		SortedTagIteratorFn: sortedTagIteratorFn,
+		NameTagKey:    []byte(cfg.NameTagKey),
+		NameAndTagsFn: m3.NameAndTags,
 	}
 
 	isRollupIDFn := func(name []byte, tags []byte) bool {
-		return m3.IsRollupID(name, tags, sortedTagIteratorPool)
+		return m3.IsRollupID(name, tags)
 	}
+
+	includeTagKeys := createIncludeTagKeysMap(cfg.IncludeTagKeys)
 
 	ruleSetOpts := rules.NewOptions().
 		SetTagsFilterOptions(tagsFilterOptions).
 		SetNewRollupIDFn(m3.NewRollupID).
-		SetIsRollupIDFn(isRollupIDFn)
+		SetIsRollupIDFn(isRollupIDFn).
+		SetIncludeTagKeys(includeTagKeys)
 
 	// Configure ruleset key function.
 	ruleSetKeyFn := func(namespace []byte) string {
@@ -135,8 +129,7 @@ func (cfg *Configuration) NewOptions(
 		SetKVStore(rulesStore).
 		SetNamespacesKey(cfg.NamespacesKey).
 		SetRuleSetKeyFn(ruleSetKeyFn).
-		SetNamespaceTag([]byte(cfg.NamespaceTag)).
-		SetDefaultNamespace([]byte(cfg.DefaultNamespace))
+		SetNamespaceResolver(namespace.NewResolver([]byte(cfg.NamespaceTag), []byte(cfg.DefaultNamespace)))
 
 	if cfg.InitWatchTimeout != 0 {
 		opts = opts.SetInitWatchTimeout(cfg.InitWatchTimeout)
@@ -146,4 +139,13 @@ func (cfg *Configuration) NewOptions(
 	}
 
 	return opts, nil
+}
+
+func createIncludeTagKeysMap(includeTagKeys []string) map[uint64]struct{} {
+	includeTagKeysMap := make(map[uint64]struct{}, len(includeTagKeys))
+	for _, includeTagKey := range includeTagKeys {
+		hashKey := murmur3.Sum64([]byte(includeTagKey))
+		includeTagKeysMap[hashKey] = struct{}{}
+	}
+	return includeTagKeysMap
 }

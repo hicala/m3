@@ -28,6 +28,8 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/dbnode/encoding"
 	"github.com/m3db/m3/src/dbnode/ts"
 	"github.com/m3db/m3/src/dbnode/x/xio"
@@ -35,8 +37,6 @@ import (
 	"github.com/m3db/m3/src/x/ident"
 	"github.com/m3db/m3/src/x/instrument"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"go.uber.org/zap"
 )
 
 // Options are options for series parsing.
@@ -115,10 +115,9 @@ func (l *seriesReader) SeriesIterators(name string) (encoding.SeriesIterators, e
 					startTime = dps[0].Timestamp.Truncate(time.Hour)
 				}
 
-				encoder.Reset(startTime, len(dps), nil)
+				encoder.Reset(xtime.ToUnixNano(startTime), len(dps), nil)
 				for _, dp := range dps {
 					err := encoder.Encode(ts.Datapoint{
-						Timestamp:      dp.Timestamp,
 						Value:          float64(dp.Value),
 						TimestampNanos: xtime.ToUnixNano(dp.Timestamp),
 					}, xtime.Nanosecond, nil)
@@ -132,7 +131,7 @@ func (l *seriesReader) SeriesIterators(name string) (encoding.SeriesIterators, e
 
 				readers := [][]xio.BlockReader{{{
 					SegmentReader: xio.NewSegmentReader(encoder.Discard()),
-					Start:         series.Start,
+					Start:         xtime.ToUnixNano(series.Start),
 					BlockSize:     series.End.Sub(series.Start),
 				}}}
 
@@ -162,10 +161,7 @@ func (l *seriesReader) SeriesIterators(name string) (encoding.SeriesIterators, e
 		}
 	}
 
-	return encoding.NewSeriesIterators(
-		iters,
-		l.iterOpts.IteratorPools.MutableSeriesIterators(),
-	), nil
+	return encoding.NewSeriesIterators(iters), nil
 }
 
 func calculateSeriesRange(seriesList []Series) (time.Time, time.Time) {

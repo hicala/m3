@@ -25,16 +25,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m3db/m3/src/dbnode/encoding"
-	"github.com/m3db/m3/src/dbnode/testdata/prototest"
-	"github.com/m3db/m3/src/x/ident"
-	xtime "github.com/m3db/m3/src/x/time"
-
 	"github.com/stretchr/testify/require"
 
+	"github.com/m3db/m3/src/dbnode/encoding"
 	"github.com/m3db/m3/src/dbnode/generated/thrift/rpc"
 	"github.com/m3db/m3/src/dbnode/namespace"
+	"github.com/m3db/m3/src/dbnode/testdata/prototest"
 	"github.com/m3db/m3/src/dbnode/ts"
+	"github.com/m3db/m3/src/x/ident"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 var (
@@ -94,7 +93,7 @@ func TestProtoSessionFetchIDsNoSchema(t *testing.T) {
 }
 
 func TestProtoSeriesIteratorRoundtrip(t *testing.T) {
-	start := time.Now().Truncate(time.Hour)
+	start := xtime.Now().Truncate(time.Hour)
 	protoIter := prototest.NewProtoMessageIterator(testProtoMessages)
 
 	data := []testValue{
@@ -110,13 +109,13 @@ func TestProtoSeriesIteratorRoundtrip(t *testing.T) {
 	encoder.Reset(data[0].t, 0, nsCtx.Schema)
 	for _, value := range data {
 		dp := ts.Datapoint{
-			Timestamp: value.t,
-			Value:     value.value,
+			TimestampNanos: value.t,
+			Value:          value.value,
 		}
 		encoder.Encode(dp, value.unit, value.annotation)
 	}
 	seg := encoder.Discard()
-	result := []*rpc.Segments{&rpc.Segments{
+	result := []*rpc.Segments{{
 		Merged: &rpc.Segment{Head: bytesIfNotNil(seg.Head), Tail: bytesIfNotNil(seg.Tail)},
 	}}
 
@@ -133,8 +132,8 @@ func TestProtoSeriesIteratorRoundtrip(t *testing.T) {
 	seriesIter.Reset(encoding.SeriesIteratorOptions{
 		ID:             ident.StringID("test_series_id"),
 		Namespace:      testNamespace,
-		StartInclusive: xtime.ToUnixNano(data[0].t),
-		EndExclusive:   xtime.ToUnixNano(start.Add(4 * time.Second)),
+		StartInclusive: data[0].t,
+		EndExclusive:   start.Add(4 * time.Second),
 		Replicas:       []encoding.MultiReaderIterator{multiIter},
 	})
 
@@ -142,7 +141,7 @@ func TestProtoSeriesIteratorRoundtrip(t *testing.T) {
 	for seriesIter.Next() {
 		dp, _, ann := seriesIter.Current()
 		require.Equal(t, data[i].value, dp.Value)
-		require.Equal(t, data[i].t, dp.Timestamp)
+		require.Equal(t, data[i].t, dp.TimestampNanos)
 		testProtoEqual(t, data[i].annotation, ann)
 		i++
 	}

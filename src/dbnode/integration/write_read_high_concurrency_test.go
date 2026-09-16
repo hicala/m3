@@ -1,4 +1,6 @@
+//go:build integration
 // +build integration
+
 //
 // Copyright (c) 2019 Uber Technologies, Inc.
 //
@@ -28,6 +30,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/cluster/services"
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/client"
@@ -35,9 +40,6 @@ import (
 	xclock "github.com/m3db/m3/src/x/clock"
 	"github.com/m3db/m3/src/x/ident"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
 
 // TestWriteReadHighConcurrencyTestMultiNS stress tests the conccurent write and read pathways in M3DB by spinning
@@ -54,12 +56,13 @@ func TestWriteReadHighConcurrencyTestMultiNS(t *testing.T) {
 		numShards   = defaultNumShards
 		minShard    = uint32(0)
 		maxShard    = uint32(numShards - 1)
+		instances   = []services.ServiceInstance{
+			node(t, 0, newClusterShardsRange(minShard, maxShard, shard.Available)),
+			node(t, 1, newClusterShardsRange(minShard, maxShard, shard.Available)),
+			node(t, 2, newClusterShardsRange(minShard, maxShard, shard.Available)),
+		}
 	)
-	nodes, closeFn, clientopts := makeMultiNodeSetup(t, numShards, true, true, []services.ServiceInstance{
-		node(t, 0, newClusterShardsRange(minShard, maxShard, shard.Available)),
-		node(t, 1, newClusterShardsRange(minShard, maxShard, shard.Available)),
-		node(t, 2, newClusterShardsRange(minShard, maxShard, shard.Available)),
-	})
+	nodes, closeFn, clientopts := makeMultiNodeSetup(t, numShards, true, true, instances) //nolint:govet
 	clientopts = clientopts.
 		SetWriteConsistencyLevel(topology.ConsistencyLevelAll).
 		SetReadConsistencyLevel(topology.ReadConsistencyLevelAll)
@@ -76,10 +79,8 @@ func TestWriteReadHighConcurrencyTestMultiNS(t *testing.T) {
 	require.NoError(t, err)
 	defer session.Close()
 
-	var (
-		insertWg sync.WaitGroup
-	)
-	now := nodes[0].DB().Options().ClockOptions().NowFn()()
+	var insertWg sync.WaitGroup
+	now := xtime.ToUnixNano(nodes[0].DB().Options().ClockOptions().NowFn()())
 	start := time.Now()
 	log.Info("starting data write")
 
@@ -125,9 +126,7 @@ func TestWriteReadHighConcurrencyTestMultiNS(t *testing.T) {
 	insertWg.Wait()
 	log.Info("test data written", zap.Duration("took", time.Since(start)))
 
-	var (
-		fetchWg sync.WaitGroup
-	)
+	var fetchWg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
 		fetchWg.Add(2)
 		idx := i
@@ -144,7 +143,6 @@ func TestWriteReadHighConcurrencyTestMultiNS(t *testing.T) {
 						return false
 					}
 					return true
-
 				}, 10*time.Second)
 				if !found {
 					panic(fmt.Sprintf("timed out waiting to fetch id: %s", id))

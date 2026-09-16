@@ -23,12 +23,13 @@ package builder
 import (
 	"bytes"
 
+	bitmap "github.com/m3dbx/pilosa/roaring"
+
 	"github.com/m3db/m3/src/m3ninx/index"
 	"github.com/m3db/m3/src/m3ninx/index/segment"
 	"github.com/m3db/m3/src/m3ninx/postings"
 	"github.com/m3db/m3/src/m3ninx/postings/roaring"
 	xerrors "github.com/m3db/m3/src/x/errors"
-	bitmap "github.com/m3dbx/pilosa/roaring"
 )
 
 var _ segment.FieldsPostingsListIterator = &multiKeyPostingsListIterator{}
@@ -41,14 +42,12 @@ type multiKeyPostingsListIterator struct {
 	currIters             []keyIterator
 	currReaders           []index.Reader
 	currFieldPostingsList postings.MutableList
-	bitmapIter            *bitmap.Iterator
 }
 
 func newMultiKeyPostingsListIterator() *multiKeyPostingsListIterator {
 	b := bitmap.NewBitmapWithDefaultPooling(defaultBitmapContainerPooling)
 	i := &multiKeyPostingsListIterator{
 		currFieldPostingsList: roaring.NewPostingsListFromBitmap(b),
-		bitmapIter:            &bitmap.Iterator{},
 	}
 	i.reset()
 	return i
@@ -149,45 +148,54 @@ func (i *multiKeyPostingsListIterator) Next() bool {
 			return false
 		}
 
-		if fieldsKeyIter.segment.offset == 0 {
+		if fieldsKeyIter.segment.offset == 0 && fieldsKeyIter.segment.skips == 0 {
 			// No offset, which means is first segment we are combining from
-			// so can just direct union
-			i.currFieldPostingsList.Union(pl)
+			// so can just direct union.
+			// Make sure skips is empty otherwise we need to do filtering.
+			if err := i.currFieldPostingsList.UnionInPlace(pl); err != nil {
+				i.err = err
+				return false
+			}
 			continue
 		}
 
 		// We have to taken into account the offset and duplicates
 		var (
-			iter           = i.bitmapIter
-			duplicates     = fieldsKeyIter.segment.duplicatesAsc
-			negativeOffset postings.ID
+			iter            = pl.Iterator()
+			negativeOffsets = fieldsKeyIter.segment.negativeOffsets
+			multiErr        = xerrors.NewMultiError()
 		)
-		bitmap, ok := roaring.BitmapFromPostingsList(pl)
-		if !ok {
-			i.err = errPostingsListNotRoaring
-			return false
-		}
-
-		iter.Reset(bitmap)
-		for v, eof := iter.Next(); !eof; v, eof = iter.Next() {
-			curr := postings.ID(v)
-			for len(duplicates) > 0 && curr > duplicates[0] {
-				duplicates = duplicates[1:]
-				negativeOffset++
-			}
-			if len(duplicates) > 0 && curr == duplicates[0] {
-				duplicates = duplicates[1:]
-				negativeOffset++
-				// Also skip this value, as itself is a duplicate
+		for iter.Next() {
+			curr := iter.Current()
+			negativeOffset := negativeOffsets[curr]
+			// Then skip the individual if matches.
+			if negativeOffset == -1 {
+				// Skip this value, as itself is a duplicate.
 				continue
 			}
-			value := curr + fieldsKeyIter.segment.offset - negativeOffset
+			value := curr + fieldsKeyIter.segment.offset - postings.ID(negativeOffset)
 			if err := i.currFieldPostingsList.Insert(value); err != nil {
-				i.err = err
+				multiErr = multiErr.Add(err)
+				multiErr = multiErr.Add(iter.Close())
+				i.err = multiErr.FinalError()
 				return false
 			}
 		}
+
+		multiErr = multiErr.Add(iter.Err())
+		multiErr = multiErr.Add(iter.Close())
+		i.err = multiErr.FinalError()
+		if i.err != nil {
+			return false
+		}
 	}
+
+	if i.currFieldPostingsList.IsEmpty() {
+		// Everything skipped or term is empty.
+		// TODO: make this non-stack based (i.e. not recursive).
+		return i.Next()
+	}
+
 	return true
 }
 

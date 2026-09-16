@@ -21,8 +21,9 @@
 package storage
 
 import (
+	"github.com/uber-go/tally"
+	"go.uber.org/zap"
 	"sync"
-	"time"
 
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
@@ -31,9 +32,6 @@ import (
 	"github.com/m3db/m3/src/x/ident"
 	"github.com/m3db/m3/src/x/pool"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/uber-go/tally"
-	"go.uber.org/zap"
 )
 
 // namespaceReaderManager maintains a pool of closed readers which can be
@@ -62,22 +60,20 @@ const (
 type databaseNamespaceReaderManager interface {
 	filesetExistsAt(
 		shard uint32,
-		blockStart time.Time,
+		blockStart xtime.UnixNano,
 	) (bool, error)
 
 	get(
 		shard uint32,
-		blockStart time.Time,
+		blockStart xtime.UnixNano,
 		position readerPosition,
 	) (fs.DataFileSetReader, error)
 
 	put(reader fs.DataFileSetReader) error
 
-	latestVolume(shard uint32, blockStart time.Time) (int, error)
+	latestVolume(shard uint32, blockStart xtime.UnixNano) (int, error)
 
-	assignShardSet(shardSet sharding.ShardSet)
-
-	tick()
+	tick(activeShardSet sharding.ShardSet)
 
 	close()
 }
@@ -86,7 +82,7 @@ type fsFileSetExistsFn func(
 	prefix string,
 	namespace ident.ID,
 	shard uint32,
-	blockStart time.Time,
+	blockStart xtime.UnixNano,
 	volume int,
 ) (bool, error)
 
@@ -110,7 +106,6 @@ type namespaceReaderManager struct {
 
 	closedReaders []cachedReader
 	openReaders   map[cachedOpenReaderKey]cachedReader
-	shardSet      sharding.ShardSet
 
 	metrics namespaceReaderManagerMetrics
 }
@@ -168,7 +163,6 @@ func newNamespaceReaderManager(
 		bytesPool:         opts.BytesPool(),
 		logger:            opts.InstrumentOptions().Logger(),
 		openReaders:       make(map[cachedOpenReaderKey]cachedReader),
-		shardSet:          sharding.NewEmptyShardSet(sharding.DefaultHashFn(1)),
 		metrics:           newNamespaceReaderManagerMetrics(namespaceScope),
 	}
 
@@ -179,7 +173,7 @@ func newNamespaceReaderManager(
 
 func (m *namespaceReaderManager) latestVolume(
 	shard uint32,
-	blockStart time.Time,
+	blockStart xtime.UnixNano,
 ) (int, error) {
 	state, err := m.blockLeaseManager.OpenLatestLease(m, block.LeaseDescriptor{
 		Namespace:  m.namespace.ID(),
@@ -195,7 +189,7 @@ func (m *namespaceReaderManager) latestVolume(
 
 func (m *namespaceReaderManager) filesetExistsAt(
 	shard uint32,
-	blockStart time.Time,
+	blockStart xtime.UnixNano,
 ) (bool, error) {
 	latestVolume, err := m.latestVolume(shard, blockStart)
 	if err != nil {
@@ -206,14 +200,8 @@ func (m *namespaceReaderManager) filesetExistsAt(
 		m.namespace.ID(), shard, blockStart, latestVolume)
 }
 
-func (m *namespaceReaderManager) assignShardSet(shardSet sharding.ShardSet) {
-	m.Lock()
-	defer m.Unlock()
-	m.shardSet = shardSet
-}
-
-func (m *namespaceReaderManager) shardExistsWithLock(shard uint32) bool {
-	_, err := m.shardSet.LookupStateByID(shard)
+func (m *namespaceReaderManager) shardExistsWithLock(shardSet sharding.ShardSet, shard uint32) bool {
+	_, err := shardSet.LookupStateByID(shard)
 	// NB(bodu): LookupStateByID returns ErrInvalidShardID when shard
 	// does not exist in the shard map which means the shard is not available.
 	return err == nil
@@ -282,7 +270,7 @@ func (m *namespaceReaderManager) cachedReaderForKey(
 
 func (m *namespaceReaderManager) get(
 	shard uint32,
-	blockStart time.Time,
+	blockStart xtime.UnixNano,
 	position readerPosition,
 ) (fs.DataFileSetReader, error) {
 	latestVolume, err := m.latestVolume(shard, blockStart)
@@ -306,7 +294,7 @@ func (m *namespaceReaderManager) get(
 
 	key := cachedOpenReaderKey{
 		shard:      shard,
-		blockStart: xtime.ToUnixNano(blockStart),
+		blockStart: blockStart,
 		position:   position,
 	}
 
@@ -402,7 +390,7 @@ func (m *namespaceReaderManager) put(reader fs.DataFileSetReader) error {
 
 	key := cachedOpenReaderKey{
 		shard:      shard,
-		blockStart: xtime.ToUnixNano(status.BlockStart),
+		blockStart: status.BlockStart,
 		position: readerPosition{
 			volume:      status.Volume,
 			dataIdx:     reader.EntriesRead(),
@@ -427,18 +415,19 @@ func (m *namespaceReaderManager) put(reader fs.DataFileSetReader) error {
 	return nil
 }
 
-func (m *namespaceReaderManager) tick() {
-	m.tickWithThreshold(expireCachedReadersAfterNumTicks)
+func (m *namespaceReaderManager) tick(activeShardSet sharding.ShardSet) {
+	m.tickWithThreshold(activeShardSet, expireCachedReadersAfterNumTicks)
 }
 
 func (m *namespaceReaderManager) close() {
 	m.blockLeaseManager.UnregisterLeaser(m)
 
 	// Perform a tick but make the threshold zero so all readers must be expired
-	m.tickWithThreshold(0)
+	emptyShardSet := sharding.NewEmptyShardSet(sharding.DefaultHashFn(1))
+	m.tickWithThreshold(emptyShardSet, 0)
 }
 
-func (m *namespaceReaderManager) tickWithThreshold(threshold int) {
+func (m *namespaceReaderManager) tickWithThreshold(activeShardSet sharding.ShardSet, threshold int) {
 	m.Lock()
 	defer m.Unlock()
 
@@ -470,7 +459,7 @@ func (m *namespaceReaderManager) tickWithThreshold(threshold int) {
 			// Also check to see if shard is still available and remove cached readers for
 			// shards that are no longer available. This ensures cached readers are eventually
 			// consistent with shard state.
-			!m.shardExistsWithLock(key.shard) {
+			!m.shardExistsWithLock(activeShardSet, key.shard) {
 			// Close before removing ref
 			if err := elem.reader.Close(); err != nil {
 				m.logger.Error("error closing reader from reader cache", zap.Error(err))
@@ -498,7 +487,7 @@ func (m *namespaceReaderManager) UpdateOpenLease(
 	// Close and remove open readers with matching key but lower volume.
 	for readerKey, cachedReader := range m.openReaders {
 		if readerKey.shard == descriptor.Shard &&
-			readerKey.blockStart == xtime.ToUnixNano(descriptor.BlockStart) &&
+			readerKey.blockStart == descriptor.BlockStart &&
 			readerKey.position.volume < state.Volume {
 			delete(m.openReaders, readerKey)
 			if err := m.closeAndPushReaderWithLock(cachedReader.reader); err != nil {

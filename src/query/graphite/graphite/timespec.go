@@ -27,11 +27,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/m3db/m3/src/query/graphite/errors"
+	"github.com/m3db/m3/src/x/errors"
 )
 
-var reRelativeTime = regexp.MustCompile(`(?i)^\-([0-9]+)(s|min|h|d|w|mon|y)$`)    // allows -3min, -4d, etc.
-var reTimeOffset = regexp.MustCompile(`(?i)^(\-|\+)([0-9]+)(s|min|h|d|w|mon|y)$`) // -3min, +3min, -4d, +4d
+var reRelativeTime = regexp.MustCompile(`(?i)^\-([0-9]+)(s|min|h|d|w|mon|y)(.*)$`)    // allows -3min, -4d, etc.
+var reTimeOffset = regexp.MustCompile(`(?i)^(\-|\+)([0-9]+)(s|min|h|d|w|mon|y)(.*)$`) // -3min, +3min, -4d, +4d
 var reMonthAndDay = regexp.MustCompile(`(?i)^(january|february|march|april|may|june|july|august|september|october|november|december)([0-9]{1,2}?)$`)
 var reDayOfWeek = regexp.MustCompile(`(?i)^(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$`)
 var reDayOfWeekOffset = regexp.MustCompile(`(?i)^(\-|\+)(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$`) // +monday, +thursday, etc
@@ -40,13 +40,30 @@ var reAM = regexp.MustCompile(`(?i)^(([0-1]?)([0-9])am)([[:ascii:]])*$`)        
 var reTimeOfDayWithColon = regexp.MustCompile(`(?i)^(([0-1]?)([0-9]):([0-5])([0-9])((am|pm)?))([[:ascii:]])*$`)       // 8:12pm, 11:20am, 2:00am
 
 var periods = map[string]time.Duration{
-	"s":   time.Second,
-	"min": time.Minute,
-	"h":   time.Hour,
-	"d":   time.Hour * 24,
-	"w":   time.Hour * 24 * 7,
-	"mon": time.Hour * 24 * 30,
-	"y":   time.Hour * 24 * 365,
+	"s":       time.Second,
+	"sec":     time.Second,
+	"seconds": time.Second,
+	"m":       time.Minute,
+	"min":     time.Minute,
+	"mins":    time.Minute,
+	"minute":  time.Minute,
+	"minutes": time.Minute,
+	"h":       time.Hour,
+	"hr":      time.Hour,
+	"hour":    time.Hour,
+	"hours":   time.Hour,
+	"d":       time.Hour * 24,
+	"day":     time.Hour * 24,
+	"days":    time.Hour * 24,
+	"w":       time.Hour * 24 * 7,
+	"week":    time.Hour * 24 * 7,
+	"weeks":   time.Hour * 24 * 7,
+	"mon":     time.Hour * 24 * 30,
+	"month":   time.Hour * 24 * 30,
+	"months":  time.Hour * 24 * 30,
+	"y":       time.Hour * 24 * 365,
+	"year":    time.Hour * 24 * 365,
+	"years":   time.Hour * 24 * 365,
 }
 
 var weekdays = map[string]int{
@@ -149,7 +166,7 @@ func ParseTime(s string, now time.Time, absoluteOffset time.Duration) (time.Time
 
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err == nil {
-		return time.Unix(n, 0).UTC(), nil
+		return time.Unix(n, 0), nil
 	}
 
 	s = strings.Replace(strings.Replace(strings.ToLower(s), ",", "", -1), " ", "", -1)

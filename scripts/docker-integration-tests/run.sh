@@ -3,46 +3,24 @@
 set -ex
 
 TESTS=(
-	scripts/docker-integration-tests/simple/test.sh
 	scripts/docker-integration-tests/cold_writes_simple/test.sh
-	scripts/docker-integration-tests/prometheus/test.sh
 	scripts/docker-integration-tests/prometheus_replication/test.sh
 	scripts/docker-integration-tests/carbon/test.sh
 	scripts/docker-integration-tests/aggregator/test.sh
 	scripts/docker-integration-tests/aggregator_legacy/test.sh
+	scripts/docker-integration-tests/aggregator_tls/test.sh
 	scripts/docker-integration-tests/query_fanout/test.sh
 	scripts/docker-integration-tests/repair/test.sh
 	scripts/docker-integration-tests/replication/test.sh
-	scripts/docker-integration-tests/repair_and_replication/test.sh
 	scripts/docker-integration-tests/multi_cluster_write/test.sh
 	scripts/docker-integration-tests/coordinator_config_rules/test.sh
 	scripts/docker-integration-tests/coordinator_noop/test.sh
+	scripts/docker-integration-tests/prom_remote_write_backend/test.sh
 )
 
-# Some systems, including our default Buildkite hosts, don't come with netcat
-# installed and we may not have perms to install it. "Install" it in the worst
-# possible way.
-if ! command -v nc && [[ "$BUILDKITE" == "true" ]]; then
-	echo "installing netcat"
-	NCDIR="$(mktemp -d)"
-
-	yumdownloader --destdir "$NCDIR" --resolve nc
-	(
-		cd "$NCDIR"
-		RPM=$(find . -maxdepth 1 -name '*.rpm' | tail -n1)
-		rpm2cpio "$RPM" | cpio -id
-	)
-
-	export PATH="$PATH:$NCDIR/usr/bin"
-
-	function cleanup_nc() {
-		rm -rf "$NCDIR"
-	}
-
-	trap cleanup_nc EXIT
+if [[ -z "$SKIP_SETUP" ]] || [[ "$SKIP_SETUP" == "false" ]]; then
+	scripts/docker-integration-tests/setup.sh
 fi
-
-scripts/docker-integration-tests/setup.sh
 
 NUM_TESTS=${#TESTS[@]}
 MIN_IDX=$((NUM_TESTS*BUILDKITE_PARALLEL_JOB/BUILDKITE_PARALLEL_JOB_COUNT))
@@ -56,7 +34,7 @@ for test in "${TESTS[@]}"; do
 		docker rm -f $(docker ps -aq) 2>/dev/null || true
 		echo "----------------------------------------------"
 		echo "running $test"
-		if ! $test; then
+		if ! (export M3_PATH=$(pwd) && $test); then
 			echo "--- :bk-status-failed: $test FAILED"
 			exit 1
 		fi

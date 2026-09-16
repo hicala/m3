@@ -1,4 +1,6 @@
+//go:build big
 // +build big
+
 //
 // Copyright (c) 2018 Uber Technologies, Inc.
 //
@@ -34,20 +36,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m3db/m3/src/x/pool"
-	"github.com/m3db/m3/src/x/serialize"
+	"github.com/leanovate/gopter"
+	"github.com/leanovate/gopter/commands"
+	"github.com/leanovate/gopter/gen"
+	"github.com/stretchr/testify/require"
 
 	"github.com/m3db/m3/src/dbnode/ts"
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/ident"
 	xos "github.com/m3db/m3/src/x/os"
+	"github.com/m3db/m3/src/x/pool"
+	"github.com/m3db/m3/src/x/serialize"
 	xtest "github.com/m3db/m3/src/x/test"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/leanovate/gopter"
-	"github.com/leanovate/gopter/commands"
-	"github.com/leanovate/gopter/gen"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -79,7 +80,7 @@ func TestCommitLogReadWrite(t *testing.T) {
 	writes, ok := writesInterface.([]generatedWrite)
 	require.True(t, ok)
 
-	ctx := context.NewContext()
+	ctx := context.NewBackground()
 	for _, w := range writes {
 		require.NoError(t, cl.Write(ctx, w.series, w.datapoint, w.unit, w.annotation))
 	}
@@ -125,7 +126,7 @@ func TestCommitLogReadWrite(t *testing.T) {
 		require.Equal(t, write.series.Namespace.String(), series.Namespace.String())
 		require.Equal(t, write.series.Shard, series.Shard)
 		require.Equal(t, write.datapoint.Value, datapoint.Value)
-		require.True(t, write.datapoint.Timestamp.Equal(datapoint.Timestamp))
+		require.Equal(t, write.datapoint.TimestampNanos, datapoint.TimestampNanos)
 
 		seriesWrites.readPosition++
 		writesBySeries[series.ID.String()] = seriesWrites
@@ -305,7 +306,7 @@ var genWriteBehindCommand = gen.SliceOfN(10, genWrite()).
 			},
 			RunFunc: func(q commands.SystemUnderTest) commands.Result {
 				s := q.(*clState)
-				ctx := context.NewContext()
+				ctx := context.NewBackground()
 				defer ctx.Close()
 
 				for _, w := range writes {
@@ -519,7 +520,7 @@ func (s *clState) writesArePresent(writes ...generatedWrite) error {
 			seriesMap = make(map[xtime.UnixNano]generatedWrite)
 			writesOnDisk[idString] = seriesMap
 		}
-		seriesMap[xtime.ToUnixNano(datapoint.Timestamp)] = generatedWrite{
+		seriesMap[datapoint.TimestampNanos] = generatedWrite{
 			series:     series,
 			datapoint:  datapoint,
 			unit:       unit,
@@ -543,7 +544,7 @@ func (s *clState) writesArePresent(writes ...generatedWrite) error {
 		if !ok {
 			return missingErr
 		}
-		gw, ok := seriesMap[xtime.ToUnixNano(w.datapoint.Timestamp)]
+		gw, ok := seriesMap[w.datapoint.TimestampNanos]
 		if !ok {
 			return missingErr
 		}
@@ -630,8 +631,8 @@ func genWrite() gopter.Gen {
 				UniqueIndex: uniqueID(ns, id),
 			},
 			datapoint: ts.Datapoint{
-				Timestamp: t,
-				Value:     v,
+				TimestampNanos: xtime.ToUnixNano(t),
+				Value:          v,
 			},
 			unit: xtime.Nanosecond,
 		}
@@ -714,4 +715,8 @@ func (c *corruptingChunkWriter) isOpen() bool {
 
 func (c *corruptingChunkWriter) sync() error {
 	return c.chunkWriter.sync()
+}
+
+func (c *corruptingChunkWriter) setOnFlush(f func(err error)) {
+	c.chunkWriter.setOnFlush(f)
 }

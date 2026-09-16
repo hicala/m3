@@ -24,11 +24,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/m3db/m3/src/dbnode/retention"
-	"github.com/m3db/m3/src/x/ident"
-
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/dbnode/retention"
+	"github.com/m3db/m3/src/x/ident"
 )
 
 func TestMetadataEqualsTrue(t *testing.T) {
@@ -104,4 +104,14 @@ func TestMetadataValidateRetentionErr(t *testing.T) {
 	mockROpts.EXPECT().Validate().Return(fmt.Errorf("some-error"))
 	_, err = NewMetadata(testID, testOpts1)
 	require.Error(t, err)
+}
+
+func TestForceColdWritesEnabledForMetadatas(t *testing.T) {
+	opts := NewOptions().SetColdWritesEnabled(false)
+	nsmd, err := NewMetadata(ident.StringID("some-string"), opts)
+	require.NoError(t, err)
+	mds := ForceColdWritesEnabledForMetadatas([]Metadata{nsmd})
+	for _, md := range mds {
+		require.True(t, md.Options().ColdWritesEnabled())
+	}
 }

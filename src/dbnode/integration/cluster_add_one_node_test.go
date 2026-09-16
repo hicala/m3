@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2016 Uber Technologies, Inc.
@@ -28,6 +29,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/cluster/services"
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/client"
@@ -40,8 +43,6 @@ import (
 	"github.com/m3db/m3/src/x/ident"
 	xtest "github.com/m3db/m3/src/x/test"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 type idShard struct {
@@ -112,17 +113,17 @@ func testClusterAddOneNode(t *testing.T, verifyCommitlogCanBootstrapAfterNodeJoi
 	topoOpts := topology.NewDynamicOptions().
 		SetConfigServiceClient(fake.NewM3ClusterClient(svcs, nil))
 	topoInit := topology.NewDynamicInitializer(topoOpts)
-	setupOpts := []bootstrappableTestSetupOptions{
+	setupOpts := []BootstrappableTestSetupOptions{
 		{
-			disablePeersBootstrapper: true,
-			topologyInitializer:      topoInit,
+			DisablePeersBootstrapper: true,
+			TopologyInitializer:      topoInit,
 		},
 		{
-			disablePeersBootstrapper: false,
-			topologyInitializer:      topoInit,
+			DisablePeersBootstrapper: false,
+			TopologyInitializer:      topoInit,
 		},
 	}
-	setups, closeFn := newDefaultBootstrappableTestSetups(t, opts, setupOpts)
+	setups, closeFn := NewDefaultBootstrappableTestSetups(t, opts, setupOpts)
 	defer closeFn()
 
 	// Write test data for first node.

@@ -24,28 +24,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m3db/m3/src/query/block"
-	"github.com/m3db/m3/src/query/executor/transform"
-	"github.com/m3db/m3/src/query/models"
-
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/query/block"
+	"github.com/m3db/m3/src/query/executor/transform"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
-func buildMeta(start time.Time) block.Metadata {
-	return block.Metadata{
-		Bounds: models.Bounds{
-			Start:    start,
-			Duration: time.Minute,
-			StepSize: time.Hour,
-		},
-		Tags: models.NewTags(0, models.NewTagOptions()),
-	}
-}
-
 func testLazyOpts(timeOffset time.Duration, valOffset float64) block.LazyOptions {
-	tt := func(t time.Time) time.Time { return t.Add(timeOffset) }
+	tt := func(t xtime.UnixNano) xtime.UnixNano { return t.Add(timeOffset) }
 	mt := func(meta block.Metadata) block.Metadata {
 		meta.Bounds.Start = meta.Bounds.Start.Add(timeOffset)
 		return meta
@@ -82,7 +71,7 @@ func TestOffsetOp(t *testing.T) {
 	require.NoError(t, err)
 
 	vals := []float64{1, 2, 3, 4}
-	now := time.Now()
+	now := xtime.Now()
 
 	step := block.NewMockStep(ctrl)
 	step.EXPECT().Time().Return(now)
@@ -121,7 +110,7 @@ func TestUnaryOp(t *testing.T) {
 	require.NoError(t, err)
 
 	vals := []float64{1, 2, 3, 4}
-	now := time.Now()
+	now := xtime.Now()
 
 	step := block.NewMockStep(ctrl)
 	step.EXPECT().Time().Return(now)

@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+// Package algo implements different types of placement algorithms
 package algo
 
 import (
@@ -34,6 +35,9 @@ func NewAlgorithm(opts placement.Options) placement.Algorithm {
 	}
 
 	if opts.IsSharded() {
+		if opts.IsSubclustered() {
+			return newSubclusteredAlgorithm(opts)
+		}
 		return newShardedAlgorithm(opts)
 	}
 

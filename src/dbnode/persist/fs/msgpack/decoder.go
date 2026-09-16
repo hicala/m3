@@ -21,16 +21,15 @@
 package msgpack
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 
+	"gopkg.in/vmihailenco/msgpack.v2"
+
 	"github.com/m3db/m3/src/dbnode/persist"
 	"github.com/m3db/m3/src/dbnode/persist/schema"
 	"github.com/m3db/m3/src/x/pool"
-
-	"gopkg.in/vmihailenco/msgpack.v2"
 )
 
 var (
@@ -38,7 +37,6 @@ var (
 	emptyIndexSummariesInfo     schema.IndexSummariesInfo
 	emptyIndexBloomFilterInfo   schema.IndexBloomFilterInfo
 	emptyIndexEntry             schema.IndexEntry
-	emptyIndexChecksumEntry     schema.IndexEntry
 	emptyIndexSummary           schema.IndexSummary
 	emptyIndexSummaryToken      IndexSummaryToken
 	emptyLogInfo                schema.LogInfo
@@ -49,22 +47,6 @@ var (
 	errorUnableToDetermineNumFieldsToSkip          = errors.New("unable to determine num fields to skip")
 	errorCalledDecodeBytesWithoutByteStreamDecoder = errors.New("called decodeBytes without byte stream decoder")
 	errorIndexEntryChecksumMismatch                = errors.New("decode index entry encountered checksum mismatch")
-)
-
-// IndexChecksumLookupStatus is the status for an index checksum lookup.
-type IndexChecksumLookupStatus byte
-
-const (
-	// ErrorLookupStatus indicates an error state.
-	ErrorLookupStatus IndexChecksumLookupStatus = iota
-	// MatchedLookupStatus indicates the current entry ID matches the requested ID.
-	MatchedLookupStatus
-	// MismatchLookupStatus indicates the current entry ID preceeds the requested ID.
-	MismatchLookupStatus
-	// NotFoundLookupStatus indicates the current entry ID is lexicographically larger than
-	// the requested ID; since the index file is in sorted order, this means the
-	// ID does does not exist in the file.
-	NotFoundLookupStatus
 )
 
 // Decoder decodes persisted msgpack-encoded data
@@ -150,26 +132,6 @@ func (dec *Decoder) DecodeIndexEntry(bytesPool pool.BytesPool) (schema.IndexEntr
 		return emptyIndexEntry, dec.err
 	}
 	return indexEntry, nil
-}
-
-// DecodeIndexEntryToIndexChecksum decodes an index entry into a minimal index entry.
-func (dec *Decoder) DecodeIndexEntryToIndexChecksum(
-	compareID []byte,
-	bytesPool pool.BytesPool,
-) (schema.IndexChecksum, IndexChecksumLookupStatus, error) {
-	if dec.err != nil {
-		return schema.IndexChecksum{}, NotFoundLookupStatus, dec.err
-	}
-	dec.readerWithDigest.setDigestReaderEnabled(true)
-	_, numFieldsToSkip := dec.decodeRootObject(indexEntryVersion, indexEntryType)
-	indexWithMetaChecksum, status := dec.decodeIndexChecksum(compareID, bytesPool)
-	dec.readerWithDigest.setDigestReaderEnabled(false)
-	dec.skip(numFieldsToSkip)
-	if status != MatchedLookupStatus || dec.err != nil {
-		return schema.IndexChecksum{}, status, dec.err
-	}
-
-	return indexWithMetaChecksum, status, nil
 }
 
 // DecodeIndexSummary decodes index summary.
@@ -470,57 +432,17 @@ func (dec *Decoder) decodeIndexEntry(bytesPool pool.BytesPool) schema.IndexEntry
 	actualChecksum := dec.readerWithDigest.digest().Sum32()
 
 	// Decode checksum field originally added in V3
-	v := dec.decodeVarint()
-	indexEntry.IndexChecksum = v
+	indexEntry.IndexChecksum = dec.decodeVarint()
+	if dec.err != nil {
+		dec.err = fmt.Errorf("decode index entry encountered error: %s", dec.err)
+		return emptyIndexEntry
+	}
+
 	if indexEntry.IndexChecksum != int64(actualChecksum) {
 		dec.err = errorIndexEntryChecksumMismatch
 	}
 
 	return indexEntry
-}
-
-func (dec *Decoder) decodeIndexChecksum(
-	compareID []byte,
-	bytesPool pool.BytesPool,
-) (schema.IndexChecksum, IndexChecksumLookupStatus) {
-	entry := dec.decodeIndexEntry(bytesPool)
-	if dec.err != nil {
-		return schema.IndexChecksum{}, ErrorLookupStatus
-	}
-
-	if entry.EncodedTags == nil {
-		if bytesPool != nil {
-			bytesPool.Put(entry.ID)
-		}
-
-		dec.err = fmt.Errorf("decode index checksum requires files V1+")
-		return schema.IndexChecksum{}, ErrorLookupStatus
-	}
-
-	compare := bytes.Compare(compareID, entry.ID)
-	var checksum int64
-	if compare == 0 {
-		// NB: need to compute hash before freeing entry bytes.
-		checksum = dec.hasher.HashIndexEntry(entry)
-		return schema.IndexChecksum{
-			IndexEntry:       entry,
-			MetadataChecksum: checksum,
-		}, MatchedLookupStatus
-	}
-
-	if bytesPool != nil {
-		bytesPool.Put(entry.ID)
-		bytesPool.Put(entry.EncodedTags)
-	}
-
-	if compare > 0 {
-		// compareID can still exist after the current entry.ID
-		return schema.IndexChecksum{}, MismatchLookupStatus
-	}
-
-	// compareID must have been before the curret entry.ID, so this
-	// ID will not be matched.
-	return schema.IndexChecksum{}, NotFoundLookupStatus
 }
 
 func (dec *Decoder) decodeIndexSummary() (schema.IndexSummary, IndexSummaryToken) {

@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2018 Uber Technologies, Inc.
@@ -26,12 +27,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
 	"github.com/m3db/m3/src/dbnode/retention"
 	xclock "github.com/m3db/m3/src/x/clock"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestDiskCleanupIndex(t *testing.T) {
@@ -78,12 +79,15 @@ func TestDiskCleanupIndex(t *testing.T) {
 
 	// Now create some fileset files
 	numTimes := 10
-	fileTimes := make([]time.Time, numTimes)
+	filesetsIdentifiers := make([]fs.FileSetFileIdentifier, numTimes)
 	now := setup.NowFn()().Truncate(idxBlockSize)
 	for i := 0; i < numTimes; i++ {
-		fileTimes[i] = now.Add(time.Duration(i) * idxBlockSize)
+		filesetsIdentifiers[i] = fs.FileSetFileIdentifier{
+			Namespace:  md.ID(),
+			BlockStart: now.Add(time.Duration(i) * idxBlockSize),
+		}
 	}
-	writeIndexFileSetFiles(t, setup.StorageOpts(), md, fileTimes)
+	writeIndexFileSetFiles(t, setup.StorageOpts(), md, filesetsIdentifiers)
 
 	deltaNow := now.Add(time.Minute)
 	filesets, err := fs.IndexFileSetsBefore(filePathPrefix, md.ID(), deltaNow)

@@ -23,15 +23,15 @@ package tag
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/query/block"
 	"github.com/m3db/m3/src/query/executor/transform"
 	"github.com/m3db/m3/src/query/models"
 	"github.com/m3db/m3/src/query/parser"
 	"github.com/m3db/m3/src/query/test"
 	"github.com/m3db/m3/src/query/test/executor"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestCombineSingleTagWithSeparator(t *testing.T) {
@@ -185,9 +185,9 @@ func TestTagJoinOp(t *testing.T) {
 			}
 
 			bl := block.NewColumnBlockBuilder(models.NoopQueryContext(), meta, seriesMeta).Build()
-			c, sink := executor.NewControllerWithSink(parser.NodeID(1))
+			c, sink := executor.NewControllerWithSink(parser.NodeID(rune(1)))
 			node := op.(baseOp).Node(c, transform.Options{})
-			err = node.Process(models.NoopQueryContext(), parser.NodeID(0), bl)
+			err = node.Process(models.NoopQueryContext(), parser.NodeID(rune(0)), bl)
 			require.NoError(t, err)
 
 			assert.Equal(t, test.StringTagsToTags(tt.expectedMetaTags), sink.Meta.Tags)

@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2018 Uber Technologies, Inc.
@@ -29,16 +30,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m3db/m3/src/dbnode/namespace"
-	"github.com/m3db/m3/src/dbnode/retention"
-	"github.com/m3db/m3/src/x/context"
-	xtime "github.com/m3db/m3/src/x/time"
-	"go.uber.org/zap"
-
 	"github.com/leanovate/gopter"
 	"github.com/leanovate/gopter/gen"
 	"github.com/leanovate/gopter/prop"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"github.com/m3db/m3/src/dbnode/namespace"
+	"github.com/m3db/m3/src/dbnode/retention"
+	"github.com/m3db/m3/src/x/context"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 // Really small block sizes make certain operations take too long
@@ -56,12 +57,12 @@ const (
 // can properly bootstrap all the data from a combination of fileset files,
 // snapshotfiles, and commit log files. It varies the following inputs to
 // the system:
-// 		1) block size
-// 		2) buffer past
-// 		3) buffer future
-// 		4) number of datapoints
-// 		5) whether it waits for data files to be flushed before shutting down
-// 		6) whether it waits for snapshot files to be written before shutting down
+//  1. block size
+//  2. buffer past
+//  3. buffer future
+//  4. number of datapoints
+//  5. whether it waits for data files to be flushed before shutting down
+//  6. whether it waits for snapshot files to be written before shutting down
 //
 // It works by generating random datapoints, and then writing those data points
 // to the node in order. At randomly selected times during the write process, the
@@ -77,6 +78,7 @@ func TestFsCommitLogMixedModeReadWriteProp(t *testing.T) {
 		props      = gopter.NewProperties(parameters)
 		reporter   = gopter.NewFormatedReporter(true, 160, os.Stdout)
 		fakeStart  = time.Date(2017, time.February, 13, 15, 30, 10, 0, time.Local)
+		xFakeStart = xtime.ToUnixNano(fakeStart)
 		rng        = rand.New(rand.NewSource(seed))
 	)
 
@@ -137,16 +139,16 @@ func TestFsCommitLogMixedModeReadWriteProp(t *testing.T) {
 				log.Sugar().Info("bufferPast: %s\n", ns1ROpts.BufferPast().String())
 				log.Sugar().Info("bufferFuture: %s\n", ns1ROpts.BufferFuture().String())
 
-				setup.SetNowFn(fakeStart)
+				setup.SetNowFn(xFakeStart)
 
 				var (
 					ids        = &idGen{longTestID}
-					datapoints = generateDatapoints(fakeStart, numPoints, ids, nil)
+					datapoints = generateDatapoints(xFakeStart, numPoints, ids, nil)
 					// Used to keep track of which datapoints have been written already.
 					lastDatapointsIdx = 0
 					earliestToCheck   = datapoints[0].time.Truncate(ns1BlockSize)
 					latestToCheck     = datapoints[len(datapoints)-1].time.Add(ns1BlockSize)
-					timesToRestart    = []time.Time{}
+					timesToRestart    = []xtime.UnixNano{}
 					start             = earliestToCheck
 					fsOpts            = setup.StorageOpts().CommitLogOptions().FilesystemOptions()
 					filePathPrefix    = fsOpts.FilePathPrefix()
@@ -166,7 +168,7 @@ func TestFsCommitLogMixedModeReadWriteProp(t *testing.T) {
 
 				for _, timeToCheck := range timesToRestart {
 					startServerWithNewInspection(t, opts, setup)
-					ctx := context.NewContext()
+					ctx := context.NewBackground()
 					defer ctx.Close()
 
 					log.Info("writing datapoints")
@@ -190,7 +192,7 @@ func TestFsCommitLogMixedModeReadWriteProp(t *testing.T) {
 							log.Warn("error writing series datapoint", zap.Error(err))
 							return false, err
 						}
-						snapshotBlocks[xtime.ToUnixNano(ts.Truncate(ns1BlockSize))] = struct{}{}
+						snapshotBlocks[ts.Truncate(ns1BlockSize)] = struct{}{}
 					}
 					lastDatapointsIdx = i
 					log.Info("wrote datapoints")
@@ -232,7 +234,7 @@ func TestFsCommitLogMixedModeReadWriteProp(t *testing.T) {
 						expectedSnapshotBlocks := make([]snapshotID, 0, len(snapshotBlocks))
 						for snapshotBlock := range snapshotBlocks {
 							expectedSnapshotBlocks = append(expectedSnapshotBlocks, snapshotID{
-								blockStart: snapshotBlock.ToTime(),
+								blockStart: snapshotBlock,
 							})
 						}
 						_, err := waitUntilSnapshotFilesFlushed(
@@ -273,8 +275,8 @@ func TestFsCommitLogMixedModeReadWriteProp(t *testing.T) {
 
 	if !props.Run(reporter) {
 		t.Errorf(
-			"failed with initial seed: %d and startTime: %d",
-			seed, fakeStart.UnixNano())
+			"failed with initial seed: %d and startTime: %v",
+			seed, fakeStart)
 	}
 }
 

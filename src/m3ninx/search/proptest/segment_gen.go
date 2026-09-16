@@ -25,14 +25,14 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/leanovate/gopter"
+	"github.com/leanovate/gopter/gen"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/m3ninx/doc"
 	"github.com/m3db/m3/src/m3ninx/index/segment"
 	"github.com/m3db/m3/src/m3ninx/index/segment/fst"
 	"github.com/m3db/m3/src/m3ninx/index/segment/mem"
-
-	"github.com/leanovate/gopter"
-	"github.com/leanovate/gopter/gen"
-	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -53,7 +53,7 @@ func collectDocs(iter doc.Iterator) ([]doc.Document, error) {
 	return docs, nil
 }
 
-func newTestMemSegment(t *testing.T, docs []doc.Document) segment.MutableSegment {
+func newTestMemSegment(t *testing.T, docs []doc.Metadata) segment.MutableSegment {
 	opts := mem.NewOptions()
 	s, err := mem.NewSegment(opts)
 	require.NoError(t, err)
@@ -64,7 +64,7 @@ func newTestMemSegment(t *testing.T, docs []doc.Document) segment.MutableSegment
 	return s
 }
 
-func (i propTestInput) generate(t *testing.T, docs []doc.Document) []segment.Segment {
+func (i propTestInput) generate(t *testing.T, docs []doc.Metadata) []segment.Segment {
 	var result []segment.Segment
 	for j := 0; j < len(i.segments); j++ {
 		s, err := mem.NewSegment(memOptions)

@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2017 Uber Technologies, Inc.
@@ -26,11 +27,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/retention"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestFilesystemBootstrapMultipleNamespaces(t *testing.T) {
@@ -76,8 +77,8 @@ func TestFilesystemBootstrapMultipleNamespaces(t *testing.T) {
 		{IDs: []string{"foo", "bar"}, NumPoints: 100, Start: now.Add(-ns2BlockSize)},
 		{IDs: []string{"foo", "baz"}, NumPoints: 50, Start: now},
 	})
-	require.NoError(t, writeTestDataToDisk(ns1, setup, ns1SeriesMaps, 0))
-	require.NoError(t, writeTestDataToDisk(ns2, setup, ns2SeriesMaps, 0))
+	require.NoError(t, writeTestDataToDiskWithIndex(ns1, setup, ns1SeriesMaps))
+	require.NoError(t, writeTestDataToDiskWithIndex(ns2, setup, ns2SeriesMaps))
 	log.Info("generated data")
 
 	// Start the server with filesystem bootstrapper

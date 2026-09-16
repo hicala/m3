@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
 	"github.com/m3db/m3/src/dbnode/runtime"
@@ -34,8 +36,6 @@ import (
 	tu "github.com/m3db/m3/src/dbnode/topology/testutil"
 	"github.com/m3db/m3/src/x/instrument"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -49,7 +49,7 @@ func TestAvailableData(t *testing.T) {
 		nsMetadata                 = testNsMetadata(t)
 		blockSize                  = 2 * time.Hour
 		numShards                  = uint32(4)
-		blockStart                 = time.Now().Truncate(blockSize)
+		blockStart                 = xtime.Now().Truncate(blockSize)
 		shardTimeRangesToBootstrap = result.NewShardTimeRanges()
 		bootstrapRanges            = xtime.NewRanges(xtime.Range{
 			Start: blockStart,

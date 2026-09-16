@@ -23,15 +23,15 @@ package binary
 import (
 	"math"
 	"testing"
-	"time"
-
-	"github.com/m3db/m3/src/query/block"
-	"github.com/m3db/m3/src/query/models"
-	"github.com/m3db/m3/src/query/test"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/query/block"
+	"github.com/m3db/m3/src/query/models"
+	"github.com/m3db/m3/src/query/test"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 var nan = math.NaN()
@@ -182,7 +182,7 @@ func TestCombineMetaAndSeriesMeta(t *testing.T) {
 }
 
 func TestCombineMetaAndSeriesMetaError(t *testing.T) {
-	now := time.Now()
+	now := xtime.Now()
 	meta, otherMeta :=
 		block.Metadata{Bounds: models.Bounds{Start: now}},
 		block.Metadata{Bounds: models.Bounds{Start: now.Add(2)}}

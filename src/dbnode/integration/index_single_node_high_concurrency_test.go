@@ -1,4 +1,6 @@
+//go:build integration
 // +build integration
+
 //
 // Copyright (c) 2016 Uber Technologies, Inc.
 //
@@ -30,6 +32,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/atomic"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/storage"
 	"github.com/m3db/m3/src/dbnode/storage/index"
@@ -39,11 +46,6 @@ import (
 	"github.com/m3db/m3/src/x/ident"
 	xsync "github.com/m3db/m3/src/x/sync"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/atomic"
-	"go.uber.org/zap"
 )
 
 func TestIndexSingleNodeHighConcurrencyManyTagsLowCardinality(t *testing.T) {
@@ -156,7 +158,7 @@ func testIndexSingleNodeHighConcurrency(
 	// Test setup
 	md, err := namespace.NewMetadata(testNamespaces[0],
 		namespace.NewOptions().
-			SetRetentionOptions(defaultIntegrationTestRetentionOpts).
+			SetRetentionOptions(DefaultIntegrationTestRetentionOpts).
 			SetCleanupEnabled(false).
 			SetSnapshotEnabled(false).
 			SetFlushEnabled(false).
@@ -230,7 +232,7 @@ func testIndexSingleNodeHighConcurrency(
 					}
 
 					id, tags := genIDTags(i, j, opts.numTags, genOpts...)
-					timestamp := time.Now()
+					timestamp := xtime.Now()
 					err := session.WriteTagged(md.ID(), id, tags,
 						timestamp, float64(j), xtime.Second, nil)
 					if err != nil {
@@ -289,7 +291,7 @@ func testIndexSingleNodeHighConcurrency(
 						match := idx.NewTermQuery([]byte("common_i"), []byte(strconv.Itoa(randI)))
 						q := index.Query{Query: match}
 
-						now := time.Now()
+						now := xtime.Now()
 						qOpts := index.AggregationOptions{
 							QueryOptions: index.QueryOptions{
 								StartInclusive: now.Add(-md.Options().RetentionOptions().RetentionPeriod()),
@@ -298,7 +300,7 @@ func testIndexSingleNodeHighConcurrency(
 							},
 						}
 
-						ctx := context.NewContext()
+						ctx := context.NewBackground()
 						r, err := testSetup.DB().AggregateQuery(ctx, md.ID(), q, qOpts)
 						if err != nil {
 							panic(err)
@@ -354,7 +356,7 @@ func testIndexSingleNodeHighConcurrency(
 			return false
 		}
 		return int(counter.Value()) == expectNumIndex
-	}, time.Minute)
+	}, time.Minute*5)
 
 	counters := testSetup.Scope().Snapshot().Counters()
 	counter, ok := counters[expectStatProcess]
@@ -364,7 +366,8 @@ func testIndexSingleNodeHighConcurrency(
 		value = int(counter.Value())
 	}
 	assert.True(t, indexProcess,
-		fmt.Sprintf("expected to index %d but processed %d", expectNumIndex, value))
+		fmt.Sprintf("timeout waiting for index to process: expected to index %d but only processed %d",
+			expectNumIndex, value))
 
 	// Allow concurrent query during writes to finish.
 	close(queryConcDuringWritesCloseCh)

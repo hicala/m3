@@ -21,10 +21,14 @@
 package namespace
 
 import (
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
 
 	clusterclient "github.com/m3db/m3/src/cluster/client"
 	"github.com/m3db/m3/src/cluster/kv"
@@ -37,9 +41,6 @@ import (
 	"github.com/m3db/m3/src/x/instrument"
 	xjson "github.com/m3db/m3/src/x/json"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
 )
 
 func TestNamespaceReadyHandler(t *testing.T) {
@@ -56,10 +57,14 @@ func TestNamespaceReadyHandler(t *testing.T) {
 		options: m3.ClusterNamespaceOptions{},
 	}
 	testClusters := testClusters{
-		namespaces: []m3.ClusterNamespace{&testClusterNs},
+		configType:         m3.ClusterConfigTypeDynamic,
+		nonReadyNamespaces: []m3.ClusterNamespace{&testClusterNs},
 	}
-	mockSession.EXPECT().FetchTaggedIDs(testClusterNs.NamespaceID(), index.Query{Query: idx.NewAllQuery()},
-		index.QueryOptions{SeriesLimit: 1, DocsLimit: 1}).Return(nil, client.FetchResponseMetadata{}, nil)
+
+	mockSession.EXPECT().
+		FetchTaggedIDs(gomock.Any(), testClusterNs.NamespaceID(), index.Query{Query: idx.NewAllQuery()},
+			index.QueryOptions{SeriesLimit: 1, DocsLimit: 1}).
+		Return(nil, client.FetchResponseMetadata{}, nil)
 
 	readyHandler := NewReadyHandler(mockClient, &testClusters, instrument.NewOptions())
 
@@ -69,7 +74,7 @@ func TestNamespaceReadyHandler(t *testing.T) {
 		"name": "testNamespace",
 	}
 
-	req := httptest.NewRequest("POST", "/namespace/mark_ready",
+	req := httptest.NewRequest("POST", "/namespace/ready",
 		xjson.MustNewTestReader(t, jsonInput))
 	require.NotNil(t, req)
 
@@ -104,7 +109,7 @@ func TestNamespaceReadyHandlerWithForce(t *testing.T) {
 		"force": true,
 	}
 
-	req := httptest.NewRequest("POST", "/namespace/mark_ready",
+	req := httptest.NewRequest("POST", "/namespace/ready",
 		xjson.MustNewTestReader(t, jsonInput))
 	require.NotNil(t, req)
 
@@ -137,14 +142,15 @@ func TestNamespaceReadyFailIfNoClusters(t *testing.T) {
 		"name": "testNamespace",
 	}
 
-	req := httptest.NewRequest("POST", "/namespace/mark_ready",
+	req := httptest.NewRequest("POST", "/namespace/ready",
 		xjson.MustNewTestReader(t, jsonInput))
 	require.NotNil(t, req)
 
 	readyHandler.ServeHTTP(svcDefaults, w, req)
 
 	resp := w.Result()
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode,
+		fmt.Sprintf("response: %s", w.Body.String()))
 }
 
 func TestNamespaceReadyFailIfNamespaceMissing(t *testing.T) {
@@ -161,7 +167,7 @@ func TestNamespaceReadyFailIfNamespaceMissing(t *testing.T) {
 		"name": "missingNamespace",
 	}
 
-	req := httptest.NewRequest("POST", "/namespace/mark_ready",
+	req := httptest.NewRequest("POST", "/namespace/ready",
 		xjson.MustNewTestReader(t, jsonInput))
 	require.NotNil(t, req)
 
@@ -169,6 +175,45 @@ func TestNamespaceReadyFailIfNamespaceMissing(t *testing.T) {
 
 	resp := w.Result()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestNamespaceReadyHandlerStaticConf(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	mockClient := clusterclient.NewMockClient(ctrl)
+	require.NotNil(t, mockClient)
+
+	tc := testClusters{
+		configType: m3.ClusterConfigTypeStatic,
+	}
+
+	readyHandler := NewReadyHandler(mockClient, &tc, instrument.NewOptions())
+
+	jsonInput := xjson.Map{
+		"name": "testNamespace",
+	}
+
+	req := httptest.NewRequest("POST", "/namespace/ready",
+		xjson.MustNewTestReader(t, jsonInput))
+	require.NotNil(t, req)
+
+	w := httptest.NewRecorder()
+	readyHandler.ServeHTTP(svcDefaults, w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	expected := xtest.MustPrettyJSONMap(t,
+		xjson.Map{
+			"ready": true,
+		})
+	actual := xtest.MustPrettyJSONString(t, string(body))
+	require.Equal(t, expected, actual, xtest.Diff(expected, actual))
 }
 
 func testSetup(t *testing.T, ctrl *gomock.Controller) (*clusterclient.MockClient, *kv.MockStore, ident.ID) {
@@ -218,21 +263,30 @@ func (t *testClusterNamespace) Session() client.Session {
 }
 
 type testClusters struct {
-	namespaces m3.ClusterNamespaces
+	configType         m3.ClusterConfigType
+	nonReadyNamespaces m3.ClusterNamespaces
 }
 
 func (t *testClusters) ClusterNamespaces() m3.ClusterNamespaces {
-	return t.namespaces
+	panic("implement me")
+}
+
+func (t *testClusters) NonReadyClusterNamespaces() m3.ClusterNamespaces {
+	return t.nonReadyNamespaces
 }
 
 func (t *testClusters) Close() error {
 	panic("implement me")
 }
 
-func (t *testClusters) UnaggregatedClusterNamespace() m3.ClusterNamespace {
+func (t *testClusters) UnaggregatedClusterNamespace() (m3.ClusterNamespace, bool) {
 	panic("implement me")
 }
 
 func (t *testClusters) AggregatedClusterNamespace(attrs m3.RetentionResolution) (m3.ClusterNamespace, bool) {
 	panic("implement me")
+}
+
+func (t *testClusters) ConfigType() m3.ClusterConfigType {
+	return t.configType
 }

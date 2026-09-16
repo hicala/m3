@@ -31,12 +31,12 @@ import (
 	"os"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/scripts/comparator/utils"
 	"github.com/m3db/m3/src/query/api/v1/handler/prometheus"
 	xerrors "github.com/m3db/m3/src/x/errors"
 	"github.com/m3db/m3/src/x/instrument"
-
-	"go.uber.org/zap"
 )
 
 func paramError(err string, log *zap.Logger) {
@@ -52,8 +52,8 @@ func main() {
 		now = time.Now()
 
 		pQueryFile    = flag.String("input", "", "the query file")
-		pPromAddress  = flag.String("promAdress", "0.0.0.0:9090", "prom address")
-		pQueryAddress = flag.String("queryAddress", "0.0.0.0:7201/m3query", "M3 query address")
+		pPromAddress  = flag.String("promAdress", "host.docker.internal:7201/m3query", "prom address")
+		pQueryAddress = flag.String("queryAddress", "host.docker.internal:7201/m3query", "M3 query address")
 
 		pComparatorAddress = flag.String("comparator", "", "comparator address")
 		pRegressionDir     = flag.String("regressionDir", "", "optional directory for regression tests")

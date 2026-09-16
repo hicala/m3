@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2016 Uber Technologies, Inc.
@@ -26,16 +27,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/protobuf/proto"
+	"github.com/stretchr/testify/require"
+	"github.com/uber-go/tally"
+
 	"github.com/m3db/m3/src/cluster/integration/etcd"
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	xmetrics "github.com/m3db/m3/src/dbnode/x/metrics"
 	"github.com/m3db/m3/src/x/instrument"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/golang/protobuf/proto"
-	"github.com/stretchr/testify/require"
-	"github.com/uber-go/tally"
 )
 
 func TestDynamicNamespaceDelete(t *testing.T) {
@@ -115,7 +116,7 @@ func TestDynamicNamespaceDelete(t *testing.T) {
 	for _, input := range inputData {
 		start := input.Start
 		testData := generate.Block(input)
-		seriesMaps[xtime.ToUnixNano(start)] = testData
+		seriesMaps[start] = testData
 	}
 	log.Info("test data is now generated")
 
@@ -149,7 +150,7 @@ func TestDynamicNamespaceDelete(t *testing.T) {
 
 	// write to new namespace
 	for start, testData := range seriesMaps {
-		testSetup.SetNowFn(start.ToTime())
+		testSetup.SetNowFn(start)
 		require.NoError(t, testSetup.WriteBatch(ns0.ID(), testData))
 	}
 	log.Info("test data is now written")

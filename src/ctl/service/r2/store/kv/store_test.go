@@ -24,6 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/ctl/service/r2"
 	r2store "github.com/m3db/m3/src/ctl/service/r2/store"
 	"github.com/m3db/m3/src/metrics/aggregation"
@@ -34,9 +37,6 @@ import (
 	"github.com/m3db/m3/src/metrics/rules/view"
 	"github.com/m3db/m3/src/metrics/rules/view/changes"
 	"github.com/m3db/m3/src/x/clock"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
 )
 
 func TestUpdateRuleSet(t *testing.T) {
@@ -291,11 +291,21 @@ func newTestRuleSetChanges(mrs view.MappingRules, rrs view.RollupRules) changes.
 // nolint: unparam
 func testRuleSet(version int, meta rules.UpdateMetadata) (rules.RuleSet, error) {
 	mutable := rules.NewEmptyRuleSet("testNamespace", meta)
-	err := mutable.ApplyRuleSetChanges(
+	rr1, err := pipeline.NewRollupOp(
+		pipeline.GroupByRollupType,
+		"testTarget",
+		[]string{"tag1", "tag2"},
+		aggregation.MustCompressTypes(aggregation.Min),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = mutable.ApplyRuleSetChanges(
 		changes.RuleSetChanges{
 			Namespace: "testNamespace",
 			RollupRuleChanges: []changes.RollupRuleChange{
-				changes.RollupRuleChange{
+				{
 					Op: changes.AddOp,
 					RuleData: &view.RollupRule{
 						Name: "rollupRule3",
@@ -303,12 +313,8 @@ func testRuleSet(version int, meta rules.UpdateMetadata) (rules.RuleSet, error) 
 							{
 								Pipeline: pipeline.NewPipeline([]pipeline.OpUnion{
 									{
-										Type: pipeline.RollupOpType,
-										Rollup: pipeline.RollupOp{
-											NewName:       []byte("testTarget"),
-											Tags:          [][]byte{[]byte("tag1"), []byte("tag2")},
-											AggregationID: aggregation.MustCompressTypes(aggregation.Min),
-										},
+										Type:   pipeline.RollupOpType,
+										Rollup: rr1,
 									},
 								}),
 								StoragePolicies: policy.StoragePolicies{
@@ -320,7 +326,7 @@ func testRuleSet(version int, meta rules.UpdateMetadata) (rules.RuleSet, error) 
 				},
 			},
 			MappingRuleChanges: []changes.MappingRuleChange{
-				changes.MappingRuleChange{
+				{
 					Op: changes.AddOp,
 					RuleData: &view.MappingRule{
 						Name: "mappingRule3",

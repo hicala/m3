@@ -23,13 +23,13 @@ package searcher
 import (
 	"testing"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/m3ninx/index"
 	"github.com/m3db/m3/src/m3ninx/postings"
 	"github.com/m3db/m3/src/m3ninx/postings/roaring"
 	"github.com/m3db/m3/src/m3ninx/search"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
 )
 
 func TestDisjunctionSearcher(t *testing.T) {
@@ -81,17 +81,17 @@ func TestDisjunctionSearcher(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test the postings list from the first Reader.
-	expected := firstPL1.Clone()
-	expected.Union(secondPL1)
-	expected.Union(thirdPL1)
+	expected := firstPL1.CloneAsMutable()
+	require.NoError(t, expected.UnionInPlace(secondPL1))
+	require.NoError(t, expected.UnionInPlace(thirdPL1))
 	pl, err := s.Search(firstReader)
 	require.NoError(t, err)
 	require.True(t, pl.Equal(expected))
 
 	// Test the postings list from the second Reader.
-	expected = firstPL2.Clone()
-	expected.Union(secondPL2)
-	expected.Union(thirdPL2)
+	expected = firstPL2.CloneAsMutable()
+	require.NoError(t, expected.UnionInPlace(secondPL2))
+	require.NoError(t, expected.UnionInPlace(thirdPL2))
 	pl, err = s.Search(secondReader)
 	require.NoError(t, err)
 	require.True(t, pl.Equal(expected))

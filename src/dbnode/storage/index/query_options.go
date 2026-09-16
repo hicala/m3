@@ -20,12 +20,6 @@
 
 package index
 
-import (
-	"fmt"
-	"sort"
-	"time"
-)
-
 // SeriesLimitExceeded returns whether a given size exceeds the
 // series limit the query options imposes, if it is enabled.
 func (o QueryOptions) SeriesLimitExceeded(size int) bool {
@@ -43,54 +37,7 @@ func (o QueryOptions) LimitsExceeded(seriesCount, docsCount int) bool {
 	return o.SeriesLimitExceeded(seriesCount) || o.DocsLimitExceeded(docsCount)
 }
 
-func (o QueryOptions) exhaustive(seriesCount, docsCount int) bool {
+// Exhaustive returns true if the provided counts did not exceeded the query limits.
+func (o QueryOptions) Exhaustive(seriesCount, docsCount int) bool {
 	return !o.SeriesLimitExceeded(seriesCount) && !o.DocsLimitExceeded(docsCount)
-}
-
-var (
-	errInvalidBatchSize = "non-positive batch size (%d) for wide query"
-	errInvalidBlockSize = "non-positive block size (%v) for wide query"
-)
-
-// NewWideQueryOptions creates a new wide query options, snapped to block start.
-func NewWideQueryOptions(
-	queryStart time.Time,
-	batchSize int,
-	blockSize time.Duration,
-	shards []uint32,
-	iterOpts IterationOptions,
-) (WideQueryOptions, error) {
-	if batchSize <= 0 {
-		return WideQueryOptions{}, fmt.Errorf(errInvalidBatchSize, batchSize)
-	}
-
-	if blockSize <= 0 {
-		return WideQueryOptions{}, fmt.Errorf(errInvalidBlockSize, blockSize)
-	}
-
-	start := queryStart.Truncate(blockSize)
-	end := start.Add(blockSize)
-
-	// NB: shards queried must be sorted.
-	sort.Slice(shards, func(i, j int) bool {
-		return shards[i] < shards[j]
-	})
-
-	return WideQueryOptions{
-		StartInclusive:   start,
-		EndExclusive:     end,
-		BatchSize:        batchSize,
-		IterationOptions: iterOpts,
-		ShardsQueried:    shards,
-	}, nil
-}
-
-// ToQueryOptions converts a WideQueryOptions to appropriate QueryOptions that
-// will not enforce any limits.
-func (q *WideQueryOptions) ToQueryOptions() QueryOptions {
-	return QueryOptions{
-		StartInclusive:   q.StartInclusive,
-		EndExclusive:     q.EndExclusive,
-		IterationOptions: q.IterationOptions,
-	}
 }

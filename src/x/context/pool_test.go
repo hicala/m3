@@ -23,9 +23,9 @@ package context
 import (
 	"testing"
 
-	"github.com/m3db/m3/src/x/resource"
-
 	"github.com/stretchr/testify/assert"
+
+	xresource "github.com/m3db/m3/src/x/resource"
 )
 
 func TestContextPool(t *testing.T) {
@@ -34,7 +34,7 @@ func TestContextPool(t *testing.T) {
 
 	ctx := pool.Get()
 	finalizeCalled := false
-	ctx.RegisterFinalizer(resource.FinalizerFn(func() {
+	ctx.RegisterFinalizer(xresource.FinalizerFn(func() {
 		finalizeCalled = true
 	}))
 	ctx.BlockingClose()

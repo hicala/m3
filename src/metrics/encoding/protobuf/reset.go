@@ -24,14 +24,6 @@ import (
 	"github.com/m3db/m3/src/metrics/generated/proto/metricpb"
 )
 
-func resetAggregatedMetricProto(pb *metricpb.AggregatedMetric) {
-	if pb == nil {
-		return
-	}
-	resetTimedMetricWithStoragePolicyProto(&pb.Metric)
-	pb.EncodeNanos = 0
-}
-
 // ReuseMetricWithMetadatasProto allows for zero-alloc reuse of
 // *metricpb.MetricWithMetadatas by deep resetting the internal slices
 // and when using gogoprotobuf's unmarshal function will reuse the slices
@@ -58,6 +50,16 @@ func ReuseMetricWithMetadatasProto(pb *metricpb.MetricWithMetadatas) {
 	resetTimedMetricWithMetadataProto(pb.TimedMetricWithMetadata)
 	resetTimedMetricWithMetadatasProto(pb.TimedMetricWithMetadatas)
 	resetTimedMetricWithStoragePolicyProto(pb.TimedMetricWithStoragePolicy)
+}
+
+// ReuseAggregatedMetricProto allows for zero-alloc reuse of
+// *metricpb.AggregatedMetric
+func ReuseAggregatedMetricProto(pb *metricpb.AggregatedMetric) {
+	if pb == nil {
+		return
+	}
+	resetTimedMetricWithStoragePolicyProto(&pb.Metric)
+	pb.EncodeNanos = 0
 }
 
 func resetCounterWithMetadatasProto(pb *metricpb.CounterWithMetadatas) {
@@ -114,6 +116,7 @@ func resetTimedMetricWithStoragePolicyProto(pb *metricpb.TimedMetricWithStorageP
 	}
 	resetTimedMetric(&pb.TimedMetric)
 	pb.StoragePolicy.Reset()
+	pb.RoutingPolicy.Reset()
 }
 
 func resetCounter(pb *metricpb.Counter) {
@@ -122,6 +125,8 @@ func resetCounter(pb *metricpb.Counter) {
 	}
 	pb.Id = pb.Id[:0]
 	pb.Value = 0
+	pb.Annotation = pb.Annotation[:0]
+	pb.ClientTimeNanos = 0
 }
 
 func resetBatchTimer(pb *metricpb.BatchTimer) {
@@ -130,6 +135,8 @@ func resetBatchTimer(pb *metricpb.BatchTimer) {
 	}
 	pb.Id = pb.Id[:0]
 	pb.Values = pb.Values[:0]
+	pb.Annotation = pb.Annotation[:0]
+	pb.ClientTimeNanos = 0
 }
 
 func resetGauge(pb *metricpb.Gauge) {
@@ -138,6 +145,8 @@ func resetGauge(pb *metricpb.Gauge) {
 	}
 	pb.Id = pb.Id[:0]
 	pb.Value = 0.0
+	pb.Annotation = pb.Annotation[:0]
+	pb.ClientTimeNanos = 0
 }
 
 func resetForwardedMetric(pb *metricpb.ForwardedMetric) {
@@ -148,6 +157,9 @@ func resetForwardedMetric(pb *metricpb.ForwardedMetric) {
 	pb.Id = pb.Id[:0]
 	pb.TimeNanos = 0
 	pb.Values = pb.Values[:0]
+	pb.PrevValues = pb.PrevValues[:0]
+	pb.Annotation = pb.Annotation[:0]
+	pb.Version = 0
 }
 
 func resetTimedMetric(pb *metricpb.TimedMetric) {
@@ -158,13 +170,11 @@ func resetTimedMetric(pb *metricpb.TimedMetric) {
 	pb.Id = pb.Id[:0]
 	pb.TimeNanos = 0
 	pb.Value = 0
+	pb.Annotation = pb.Annotation[:0]
 }
 
 func resetMetadatas(pb *metricpb.StagedMetadatas) {
-	if pb == nil {
-		return
-	}
-	pb.Metadatas = pb.Metadatas[:0]
+	pb.Reuse()
 }
 
 func resetForwardMetadata(pb *metricpb.ForwardMetadata) {
@@ -176,6 +186,8 @@ func resetForwardMetadata(pb *metricpb.ForwardMetadata) {
 	pb.Pipeline.Ops = pb.Pipeline.Ops[:0]
 	pb.SourceId = 0
 	pb.NumForwardedTimes = 0
+	pb.ResendEnabled = false
+	pb.RoutingPolicy.Reset()
 }
 
 func resetTimedMetadata(pb *metricpb.TimedMetadata) {
@@ -184,4 +196,5 @@ func resetTimedMetadata(pb *metricpb.TimedMetadata) {
 	}
 	pb.AggregationId.Reset()
 	pb.StoragePolicy.Reset()
+	pb.RoutingPolicy.Reset()
 }

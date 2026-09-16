@@ -27,6 +27,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+	"github.com/uber-go/tally"
+
 	"github.com/m3db/m3/src/cmd/services/m3coordinator/server/m3msg"
 	"github.com/m3db/m3/src/metrics/encoding/protobuf"
 	"github.com/m3db/m3/src/metrics/policy"
@@ -41,10 +45,6 @@ import (
 	"github.com/m3db/m3/src/x/pool"
 	"github.com/m3db/m3/src/x/serialize"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
-	"github.com/uber-go/tally"
 )
 
 func TestIngest(t *testing.T) {
@@ -72,7 +72,7 @@ func TestIngest(t *testing.T) {
 	callback := m3msg.NewProtobufCallback(m, protobuf.NewAggregatedDecoder(nil), &wg)
 
 	m.EXPECT().Ack()
-	ingester.Ingest(context.TODO(), id, metricNanos, 0, val, sp, callback)
+	ingester.Ingest(context.TODO(), id, metricNanos, 0, val, nil, sp, callback)
 
 	for appender.cnt() != 1 {
 		time.Sleep(100 * time.Millisecond)
@@ -87,13 +87,13 @@ func TestIngest(t *testing.T) {
 		},
 		Datapoints: ts.Datapoints{
 			ts.Datapoint{
-				Timestamp: time.Unix(0, metricNanos),
+				Timestamp: xtime.UnixNano(metricNanos),
 				Value:     val,
 			},
 		},
 		Tags: models.NewTags(2, nil).AddTags(
 			[]models.Tag{
-				models.Tag{
+				{
 					Name:  []byte("__name__"),
 					Value: []byte("foo"),
 				},
@@ -144,7 +144,7 @@ func TestIngestNonRetryableError(t *testing.T) {
 	callback := m3msg.NewProtobufCallback(m, protobuf.NewAggregatedDecoder(nil), &wg)
 
 	m.EXPECT().Ack()
-	ingester.Ingest(context.TODO(), id, metricNanos, 0, val, sp, callback)
+	ingester.Ingest(context.TODO(), id, metricNanos, 0, val, nil, sp, callback)
 
 	for appender.cntErr() != 1 {
 		time.Sleep(100 * time.Millisecond)

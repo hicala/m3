@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/pborman/uuid"
+
 	"github.com/m3db/m3/src/metrics/aggregation"
 	merrors "github.com/m3db/m3/src/metrics/errors"
 	"github.com/m3db/m3/src/metrics/filters"
@@ -36,8 +38,6 @@ import (
 	"github.com/m3db/m3/src/metrics/policy"
 	"github.com/m3db/m3/src/metrics/rules/view"
 	"github.com/m3db/m3/src/query/models"
-
-	"github.com/pborman/uuid"
 )
 
 const (
@@ -61,7 +61,7 @@ type mappingRuleSnapshot struct {
 	name               string
 	tombstoned         bool
 	cutoverNanos       int64
-	filter             filters.Filter
+	filter             filters.TagsFilter
 	rawFilter          string
 	aggregationID      aggregation.ID
 	storagePolicies    policy.StoragePolicies
@@ -145,7 +145,7 @@ func newMappingRuleSnapshotFromProto(
 func newMappingRuleSnapshotFromFields(
 	name string,
 	cutoverNanos int64,
-	filter filters.Filter,
+	filter filters.TagsFilter,
 	rawFilter string,
 	aggregationID aggregation.ID,
 	storagePolicies policy.StoragePolicies,
@@ -178,7 +178,7 @@ func newMappingRuleSnapshotFromFieldsInternal(
 	name string,
 	tombstoned bool,
 	cutoverNanos int64,
-	filter filters.Filter,
+	filter filters.TagsFilter,
 	rawFilter string,
 	aggregationID aggregation.ID,
 	storagePolicies policy.StoragePolicies,
@@ -213,17 +213,13 @@ func newMappingRuleSnapshotFromFieldsInternal(
 }
 
 func (mrs *mappingRuleSnapshot) clone() mappingRuleSnapshot {
-	var filter filters.Filter
-	if mrs.filter != nil {
-		filter = mrs.filter.Clone()
-	}
 	tags := make([]models.Tag, len(mrs.tags))
 	copy(tags, mrs.tags)
 	return mappingRuleSnapshot{
 		name:               mrs.name,
 		tombstoned:         mrs.tombstoned,
 		cutoverNanos:       mrs.cutoverNanos,
-		filter:             filter,
+		filter:             mrs.filter,
 		rawFilter:          mrs.rawFilter,
 		aggregationID:      mrs.aggregationID,
 		storagePolicies:    mrs.storagePolicies.Clone(),
@@ -478,5 +474,6 @@ func (mc *mappingRule) mappingRuleView(snapshotIdx int) (view.MappingRule, error
 		StoragePolicies:     mrs.storagePolicies,
 		LastUpdatedBy:       mrs.lastUpdatedBy,
 		LastUpdatedAtMillis: mrs.lastUpdatedAtNanos / nanosPerMilli,
+		Tags:                mrs.tags,
 	}, nil
 }

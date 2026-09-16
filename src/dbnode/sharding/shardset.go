@@ -24,13 +24,14 @@ import (
 	"errors"
 	"math"
 
+	murmur3 "github.com/m3db/stackmurmur3/v2"
+
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/x/ident"
-	"github.com/m3db/stackmurmur3/v2"
 )
 
 var (
-	// ErrDuplicateShards returned when shard set is empty
+	// ErrDuplicateShards returned when shard set contains duplicate shards
 	ErrDuplicateShards = errors.New("duplicate shards")
 
 	// ErrInvalidShardID is returned on an invalid shard ID
@@ -74,6 +75,14 @@ func newValidatedShardSet(shards []shard.Shard, fn HashFn) ShardSet {
 
 func (s *shardSet) Lookup(identifier ident.ID) uint32 {
 	return s.fn(identifier)
+}
+
+func (s *shardSet) LookupShard(shardID uint32) (shard.Shard, error) {
+	hostShard, ok := s.shardMap[shardID]
+	if !ok {
+		return nil, ErrInvalidShardID
+	}
+	return hostShard, nil
 }
 
 func (s *shardSet) LookupStateByID(shardID uint32) (shard.State, error) {

@@ -32,9 +32,16 @@ enum ErrorType {
 	BAD_REQUEST
 }
 
+enum ErrorFlags {
+    NONE               = 0x00,
+    RESOURCE_EXHAUSTED = 0x01,
+    SERVER_TIMEOUT     = 0x02
+}
+
 exception Error {
 	1: required ErrorType type = ErrorType.INTERNAL_ERROR
 	2: required string message
+	3: optional i64 flags = 0
 }
 
 exception WriteBatchRawErrors {
@@ -93,6 +100,7 @@ struct FetchRequest {
 	4: required string id
 	5: optional TimeType rangeType = TimeType.UNIX_SECONDS
 	6: optional TimeType resultTimeType = TimeType.UNIX_SECONDS
+	7: optional binary source
 }
 
 struct FetchResult {
@@ -125,12 +133,14 @@ struct FetchBatchRawRequest {
 	3: required binary nameSpace
 	4: required list<binary> ids
 	5: optional TimeType rangeTimeType = TimeType.UNIX_SECONDS
+	6: optional binary source
 }
 
 
 struct FetchBatchRawV2Request {
 	1: required list<binary> nameSpaces
 	2: required list<FetchBatchRawV2RequestElement> elements
+	3: optional binary source
 }
 
 struct FetchBatchRawV2RequestElement {
@@ -169,15 +179,19 @@ struct FetchTaggedRequest {
 	3: required i64 rangeStart
 	4: required i64 rangeEnd
 	5: required bool fetchData
-	6: optional i64 limit
+	6: optional i64 seriesLimit
 	7: optional TimeType rangeTimeType = TimeType.UNIX_SECONDS
-	8: optional bool requireExhaustive = false
+	8: optional bool requireExhaustive = true
 	9: optional i64 docsLimit
+	10: optional binary source
+	11: optional bool requireNoWait = false
 }
 
 struct FetchTaggedResult {
 	1: required list<FetchTaggedIDResult> elements
 	2: required bool exhaustive
+	3: optional i64 waitedIndex
+	4: optional i64 waitedSeriesRead
 }
 
 struct FetchTaggedIDResult {
@@ -194,6 +208,7 @@ struct FetchBlocksRawRequest {
 	1: required binary nameSpace
 	2: required i32 shard
 	3: required list<FetchBlocksRawRequestElement> elements
+	4: optional binary source
 }
 
 struct FetchBlocksRawRequestElement {
@@ -387,15 +402,20 @@ struct AggregateQueryRawRequest {
 	2: required i64 rangeStart
 	3: required i64 rangeEnd
 	4: required binary nameSpace
-	5: optional i64 limit
+	5: optional i64 seriesLimit
 	6: optional list<binary> tagNameFilter
 	7: optional AggregateQueryType aggregateQueryType = AggregateQueryType.AGGREGATE_BY_TAG_NAME_VALUE
 	8: optional TimeType rangeType = TimeType.UNIX_SECONDS
+	9: optional binary source
+	10: optional i64 docsLimit
+	11: optional bool requireExhaustive
+	12: optional bool requireNoWait
 }
 
 struct AggregateQueryRawResult {
 	1: required list<AggregateQueryRawResultTagNameElement> results
 	2: required bool exhaustive
+	3: optional i64 waitedIndex
 }
 
 struct AggregateQueryRawResultTagNameElement {
@@ -413,10 +433,14 @@ struct AggregateQueryRequest {
 	2: required i64 rangeStart
 	3: required i64 rangeEnd
 	4: required string nameSpace
-	5: optional i64 limit
+	5: optional i64 seriesLimit
 	6: optional list<string> tagNameFilter
 	7: optional AggregateQueryType aggregateQueryType = AggregateQueryType.AGGREGATE_BY_TAG_NAME_VALUE
 	8: optional TimeType rangeType = TimeType.UNIX_SECONDS
+	9: optional binary source
+	10: optional i64 docsLimit
+	11: optional bool requireExhaustive
+	12: optional bool requireNoWait
 }
 
 struct AggregateQueryResult {
@@ -443,6 +467,35 @@ struct QueryRequest {
 	6: optional bool noData
 	7: optional TimeType rangeType = TimeType.UNIX_SECONDS
 	8: optional TimeType resultTimeType = TimeType.UNIX_SECONDS
+	9: optional binary source
+	// Additional options for the Cluster service.
+	10: optional ClusterQueryOptions clusterOptions
+}
+
+// ClusterQueryOptions are additional options for a QueryRequest to the Cluster service.
+struct ClusterQueryOptions {
+        // The read consistency level to use for the query.
+        1: optional ReadConsistency readConsistency
+        // The strategy to resolve conflicts for different values for the same timestamp.
+        2: optional EqualTimestampStrategy conflictResolutionStrategy
+}
+
+// Enumeration of read consistency values. Matches ReadConsistencyLevel type in golang.
+enum ReadConsistency {
+	ONE,
+	UNSTRICT_MAJORITY,
+	MAJORITY,
+	UNSTRICT_ALL,
+	ALL
+}
+
+// Enumeration of strategies to resolve read conflicts for equal timestamps. Matches IterateEqualTimestampStrategy in
+// golang.
+enum EqualTimestampStrategy {
+        LAST_PUSHED,
+        HIGHEST_VALUE,
+        LOWEST_VALUE,
+        HIGHEST_FREQUENCY,
 }
 
 struct QueryResult {

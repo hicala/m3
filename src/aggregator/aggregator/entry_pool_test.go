@@ -23,23 +23,23 @@ package aggregator
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/aggregator/runtime"
 	"github.com/m3db/m3/src/x/pool"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestEntryPool(t *testing.T) {
 	runtimeOpts := runtime.NewOptions()
 	p := NewEntryPool(pool.NewObjectPoolOptions().SetSize(1))
 	p.Init(func() *Entry {
-		return NewEntry(nil, runtimeOpts, NewOptions())
+		return NewEntry(nil, runtimeOpts, newTestOptions())
 	})
 
 	// Retrieve an entry from the pool.
 	entry := p.Get()
 	lists := &metricLists{}
-	entry.ResetSetData(&metricLists{}, runtimeOpts, NewOptions())
+	entry.ResetSetData(&metricLists{}, runtimeOpts, newTestOptions())
 	require.Equal(t, lists, entry.lists)
 
 	// Put the entry back to pool.

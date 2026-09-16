@@ -40,10 +40,11 @@ var (
 
 // Metric is a metric, which is essentially a named value at certain time.
 type Metric struct {
-	Type      metric.Type
-	ID        id.RawID
-	TimeNanos int64
-	Value     float64
+	ID         id.RawID
+	Annotation []byte
+	Type       metric.Type
+	TimeNanos  int64
+	Value      float64
 }
 
 // ToProto converts the metric to a protobuf message in place.
@@ -54,6 +55,7 @@ func (m Metric) ToProto(pb *metricpb.TimedMetric) error {
 	pb.Id = m.ID
 	pb.TimeNanos = m.TimeNanos
 	pb.Value = m.Value
+	pb.Annotation = m.Annotation
 	return nil
 }
 
@@ -65,6 +67,7 @@ func (m *Metric) FromProto(pb metricpb.TimedMetric) error {
 	m.ID = pb.Id
 	m.TimeNanos = pb.TimeNanos
 	m.Value = pb.Value
+	m.Annotation = pb.Annotation
 	return nil
 }
 
@@ -81,8 +84,9 @@ func (m Metric) String() string {
 // ChunkedMetric is a metric with a chunked ID.
 type ChunkedMetric struct {
 	id.ChunkedID
-	TimeNanos int64
-	Value     float64
+	Annotation []byte
+	TimeNanos  int64
+	Value      float64
 }
 
 // RawMetric is a metric in its raw form (e.g., encoded bytes associated with
@@ -111,6 +115,7 @@ type RawMetric interface {
 type MetricWithStoragePolicy struct {
 	Metric
 	policy.StoragePolicy
+	policy.RoutingPolicy
 }
 
 // ToProto converts the chunked metric with storage policy to a protobuf message in place.
@@ -118,8 +123,15 @@ func (m MetricWithStoragePolicy) ToProto(pb *metricpb.TimedMetricWithStoragePoli
 	if err := m.Metric.ToProto(&pb.TimedMetric); err != nil {
 		return err
 	}
-
-	return m.StoragePolicy.ToProto(&pb.StoragePolicy)
+	err := m.StoragePolicy.ToProto(&pb.StoragePolicy)
+	if err != nil {
+		return err
+	}
+	err = m.RoutingPolicy.ToProto(&pb.RoutingPolicy)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // FromProto converts the protobuf message to a chunked metric with storage policy in place.
@@ -127,26 +139,43 @@ func (m *MetricWithStoragePolicy) FromProto(pb metricpb.TimedMetricWithStoragePo
 	if err := m.Metric.FromProto(pb.TimedMetric); err != nil {
 		return err
 	}
-	return m.StoragePolicy.FromProto(pb.StoragePolicy)
+	err := m.StoragePolicy.FromProto(pb.StoragePolicy)
+	if err != nil {
+		return err
+	}
+	err = m.RoutingPolicy.FromProto(pb.RoutingPolicy)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // String is the string representation of a metric with storage policy.
 func (m MetricWithStoragePolicy) String() string {
-	return fmt.Sprintf("{metric:%s,policy:%s}", m.Metric.String(), m.StoragePolicy.String())
+	return fmt.Sprintf(
+		"{metric:%s,policy:%s,routing_policy:%s}",
+		m.Metric.String(),
+		m.StoragePolicy.String(),
+		m.RoutingPolicy.String(),
+	)
 }
 
 // ChunkedMetricWithStoragePolicy is a chunked metric with applicable storage policy.
 type ChunkedMetricWithStoragePolicy struct {
 	ChunkedMetric
 	policy.StoragePolicy
+	policy.RoutingPolicy
 }
 
 // ForwardedMetric is a forwarded metric.
 type ForwardedMetric struct {
-	Type      metric.Type
-	ID        id.RawID
-	TimeNanos int64
-	Values    []float64
+	ID         id.RawID
+	Values     []float64
+	PrevValues []float64
+	Annotation []byte
+	Type       metric.Type
+	TimeNanos  int64
+	Version    uint32
 }
 
 // ToProto converts the forwarded metric to a protobuf message in place.
@@ -157,6 +186,9 @@ func (m ForwardedMetric) ToProto(pb *metricpb.ForwardedMetric) error {
 	pb.Id = m.ID
 	pb.TimeNanos = m.TimeNanos
 	pb.Values = m.Values
+	pb.PrevValues = m.PrevValues
+	pb.Annotation = m.Annotation
+	pb.Version = m.Version
 	return nil
 }
 
@@ -168,16 +200,20 @@ func (m *ForwardedMetric) FromProto(pb metricpb.ForwardedMetric) error {
 	m.ID = pb.Id
 	m.TimeNanos = pb.TimeNanos
 	m.Values = pb.Values
+	m.PrevValues = pb.PrevValues
+	m.Annotation = pb.Annotation
+	m.Version = pb.Version
 	return nil
 }
 
 // String is a string representation of the forwarded metric.
 func (m ForwardedMetric) String() string {
 	return fmt.Sprintf(
-		"{id:%s,timestamp:%s,values:%v}",
+		"{id:%s,timestamp:%s,values:%v,prev_values:%v}",
 		m.ID.String(),
 		time.Unix(0, m.TimeNanos).String(),
 		m.Values,
+		m.PrevValues,
 	)
 }
 
@@ -233,8 +269,8 @@ func (tm *TimedMetricWithMetadata) FromProto(pb *metricpb.TimedMetricWithMetadat
 
 // TimedMetricWithMetadatas is a timed metric with staged metadatas.
 type TimedMetricWithMetadatas struct {
-	Metric
 	metadata.StagedMetadatas
+	Metric
 }
 
 // ToProto converts the timed metric with metadata to a protobuf message in place.
@@ -260,6 +296,7 @@ func (tm *TimedMetricWithMetadatas) FromProto(pb *metricpb.TimedMetricWithMetada
 type PassthroughMetricWithMetadata struct {
 	Metric
 	policy.StoragePolicy
+	policy.RoutingPolicy
 }
 
 // ToProto converts the passthrough metric with metadata to a protobuf message in place.
@@ -267,7 +304,16 @@ func (pm PassthroughMetricWithMetadata) ToProto(pb *metricpb.TimedMetricWithStor
 	if err := pm.Metric.ToProto(&pb.TimedMetric); err != nil {
 		return err
 	}
-	return pm.StoragePolicy.ToProto(&pb.StoragePolicy)
+	err := pm.StoragePolicy.ToProto(&pb.StoragePolicy)
+	if err != nil {
+		return err
+	}
+	err = pm.RoutingPolicy.ToProto(&pb.RoutingPolicy)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // FromProto converts the protobuf message to a timed metric with metadata in place.
@@ -278,5 +324,13 @@ func (pm *PassthroughMetricWithMetadata) FromProto(pb *metricpb.TimedMetricWithS
 	if err := pm.Metric.FromProto(pb.TimedMetric); err != nil {
 		return err
 	}
-	return pm.StoragePolicy.FromProto(pb.StoragePolicy)
+	err := pm.StoragePolicy.FromProto(pb.StoragePolicy)
+	if err != nil {
+		return err
+	}
+	err = pm.RoutingPolicy.FromProto(pb.RoutingPolicy)
+	if err != nil {
+		return err
+	}
+	return nil
 }

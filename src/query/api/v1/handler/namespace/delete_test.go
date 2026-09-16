@@ -26,14 +26,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/m3db/m3/src/cluster/kv"
-	nsproto "github.com/m3db/m3/src/dbnode/generated/proto/namespace"
-	"github.com/m3db/m3/src/x/instrument"
-
 	"github.com/golang/mock/gomock"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/m3db/m3/src/cluster/kv"
+	nsproto "github.com/m3db/m3/src/dbnode/generated/proto/namespace"
+	"github.com/m3db/m3/src/x/instrument"
 )
 
 func TestNamespaceDeleteHandlerNotFound(t *testing.T) {
@@ -56,7 +56,9 @@ func TestNamespaceDeleteHandlerNotFound(t *testing.T) {
 	resp := w.Result()
 	body, _ := ioutil.ReadAll(resp.Body)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-	assert.Equal(t, "{\"error\":\"unable to find a namespace with specified name\"}\n", string(body))
+	assert.JSONEq(t,
+		`{"status":"error","error":"unable to find a namespace with specified name"}`,
+		string(body))
 }
 
 func TestNamespaceDeleteHandlerDeleteAll(t *testing.T) {

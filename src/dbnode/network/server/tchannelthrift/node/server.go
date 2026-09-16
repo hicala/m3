@@ -21,12 +21,12 @@
 package node
 
 import (
+	"github.com/uber/tchannel-go"
+
 	ns "github.com/m3db/m3/src/dbnode/network/server"
 	"github.com/m3db/m3/src/dbnode/network/server/tchannelthrift"
 	"github.com/m3db/m3/src/dbnode/network/server/tchannelthrift/node/channel"
 	"github.com/m3db/m3/src/x/context"
-
-	"github.com/uber/tchannel-go"
 )
 
 type server struct {
@@ -52,8 +52,14 @@ func NewServer(
 }
 
 func (s *server) ListenAndServe() (ns.Close, error) {
-	chanOpts := s.opts.ChannelOptions()
-	channel, err := tchannel.NewChannel(channel.ChannelName, chanOpts)
+	// NB(r): Keep ref to a local channel options since it's actually modified
+	// by TChannel itself to set defaults.
+	var opts *tchannel.ChannelOptions
+	if chanOpts := s.opts.ChannelOptions(); chanOpts != nil {
+		immutableOpts := *chanOpts
+		opts = &immutableOpts
+	}
+	channel, err := s.opts.TChanChannelFn()(s.service, channel.ChannelName, opts)
 	if err != nil {
 		return nil, err
 	}

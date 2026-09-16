@@ -23,9 +23,9 @@ package algo
 import (
 	"testing"
 
-	"github.com/m3db/m3/src/cluster/placement"
-
 	"github.com/stretchr/testify/assert"
+
+	"github.com/m3db/m3/src/cluster/placement"
 )
 
 func TestNonShardedAlgo(t *testing.T) {
@@ -98,6 +98,10 @@ func TestNonShardedAlgo(t *testing.T) {
 	assert.Equal(t, 0, p.NumShards())
 	assert.Equal(t, 2, p.ReplicaFactor())
 	assert.False(t, p.IsSharded())
+
+	balancedPlacement, err := a.BalanceShards(p)
+	assert.NoError(t, err)
+	assert.NoError(t, placement.Validate(balancedPlacement))
 }
 
 func TestIncompatibleWithNonShardedAlgo(t *testing.T) {
@@ -123,6 +127,10 @@ func TestIncompatibleWithNonShardedAlgo(t *testing.T) {
 	assert.Equal(t, errInCompatibleWithNonShardedAlgo, err)
 
 	_, err = a.ReplaceInstances(p, []string{"i1"}, []placement.Instance{i3, i4})
+	assert.Error(t, err)
+	assert.Equal(t, errInCompatibleWithNonShardedAlgo, err)
+
+	_, err = a.BalanceShards(p)
 	assert.Error(t, err)
 	assert.Equal(t, errInCompatibleWithNonShardedAlgo, err)
 }

@@ -21,12 +21,9 @@
 package index
 
 import (
-	"math"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestQueryOptions(t *testing.T) {
@@ -45,61 +42,7 @@ func TestQueryOptions(t *testing.T) {
 	assert.True(t, opts.LimitsExceeded(20, 9))
 	assert.False(t, opts.LimitsExceeded(19, 9))
 
-	assert.False(t, opts.exhaustive(19, 10))
-	assert.False(t, opts.exhaustive(20, 9))
-	assert.True(t, opts.exhaustive(19, 9))
-}
-
-func TestInvalidWideQueryOptions(t *testing.T) {
-	var (
-		now      = time.Now()
-		iterOpts = IterationOptions{}
-
-		batchSize int
-		blockSize time.Duration
-	)
-
-	_, err := NewWideQueryOptions(now, batchSize, blockSize, nil, iterOpts)
-	require.EqualError(t, err, "non-positive batch size (0) for wide query")
-
-	batchSize = 1
-	_, err = NewWideQueryOptions(now, batchSize, blockSize, nil, iterOpts)
-	require.EqualError(t, err, "non-positive block size (0s) for wide query")
-
-	blockSize = time.Minute
-	_, err = NewWideQueryOptions(now, batchSize, blockSize, nil, iterOpts)
-	require.NoError(t, err)
-}
-
-func TestWideQueryOptions(t *testing.T) {
-	var (
-		now       = time.Now()
-		batchSize = 100
-		blockSize = time.Hour * 2
-		iterOpts  = IterationOptions{}
-		shards    = []uint32{100, 23, 1}
-	)
-
-	opts, err := NewWideQueryOptions(now, batchSize, blockSize, shards, iterOpts)
-	require.NoError(t, err)
-	assert.Equal(t, WideQueryOptions{
-		StartInclusive:   now.Truncate(blockSize),
-		EndExclusive:     now.Truncate(blockSize).Add(blockSize),
-		BatchSize:        batchSize,
-		IterationOptions: iterOpts,
-		ShardsQueried:    []uint32{1, 23, 100},
-	}, opts)
-
-	qOpts := opts.ToQueryOptions()
-	assert.Equal(t, QueryOptions{
-		StartInclusive:    now.Truncate(blockSize),
-		EndExclusive:      now.Truncate(blockSize).Add(blockSize),
-		SeriesLimit:       0,
-		DocsLimit:         0,
-		RequireExhaustive: false,
-		IterationOptions:  iterOpts,
-	}, qOpts)
-
-	upperBound := int(math.MaxInt64)
-	assert.False(t, qOpts.LimitsExceeded(upperBound, upperBound))
+	assert.False(t, opts.Exhaustive(19, 10))
+	assert.False(t, opts.Exhaustive(20, 9))
+	assert.True(t, opts.Exhaustive(19, 9))
 }

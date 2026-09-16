@@ -25,10 +25,10 @@ import (
 	"log"
 	"os"
 
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/dbnode/persist/fs/clone"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"go.uber.org/zap"
 )
 
 var (
@@ -65,13 +65,13 @@ func main() {
 		PathPrefix: *optSrcPathPrefix,
 		Namespace:  *optSrcNamespace,
 		Shard:      uint32(*optSrcShard),
-		Blockstart: xtime.FromNanoseconds(*optSrcBlockstart),
+		Blockstart: xtime.UnixNano(*optSrcBlockstart),
 	}
 	dest := clone.FileSetID{
 		PathPrefix: *optDestPathPrefix,
 		Namespace:  *optDestNamespace,
 		Shard:      uint32(*optDestShard),
-		Blockstart: xtime.FromNanoseconds(*optDestBlockstart),
+		Blockstart: xtime.UnixNano(*optDestBlockstart),
 	}
 
 	logger.Infof("source: %+v", src)

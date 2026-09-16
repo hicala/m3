@@ -26,16 +26,16 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/cluster/kv"
 	"github.com/m3db/m3/src/cluster/kv/mem"
 	"github.com/m3db/m3/src/cluster/placement"
 	"github.com/m3db/m3/src/cluster/placement/selector"
 	placementstorage "github.com/m3db/m3/src/cluster/placement/storage"
 	"github.com/m3db/m3/src/cluster/shard"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
 
 const (
@@ -59,7 +59,6 @@ const (
 	instG3I1 = "g3_i1"
 	instG3I2 = "g3_i2"
 	instG3I3 = "g3_i3"
-
 )
 
 var (
@@ -205,7 +204,7 @@ func mirroredCustomGroupSelectorSetup(t *testing.T) *mirroredCustomGroupSelector
 	tctx.Groups = testGroups
 
 	opts := placement.NewOptions().
-		SetValidZone(zone). 
+		SetValidZone(zone).
 		SetIsMirrored(true)
 
 	tctx.Selector = selector.NewMirroredCustomGroupSelector(
@@ -217,7 +216,7 @@ func mirroredCustomGroupSelectorSetup(t *testing.T) *mirroredCustomGroupSelector
 
 	tctx.KVStore = mem.NewStore()
 	tctx.Storage = placementstorage.NewPlacementStorage(tctx.KVStore, "placement", tctx.Opts)
-	tctx.Service = NewPlacementService(tctx.Storage, tctx.Opts)
+	tctx.Service = NewPlacementService(tctx.Storage, WithPlacementOptions(tctx.Opts))
 	return tctx
 }
 

@@ -23,6 +23,10 @@ package peers
 import (
 	"testing"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/client"
 	"github.com/m3db/m3/src/dbnode/persist"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
@@ -30,10 +34,6 @@ import (
 	"github.com/m3db/m3/src/dbnode/storage/index"
 	"github.com/m3db/m3/src/dbnode/storage/index/compaction"
 	"github.com/m3db/m3/src/m3ninx/index/segment/fst"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestNewPeersBootstrapperInvalidOpts(t *testing.T) {
@@ -46,8 +46,8 @@ func TestNewPeersBootstrapper(t *testing.T) {
 	defer ctrl.Finish()
 
 	idxOpts := index.NewOptions()
-	compactor, err := compaction.NewCompactor(idxOpts.DocumentArrayPool(),
-		index.DocumentArrayPoolCapacity,
+	compactor, err := compaction.NewCompactor(idxOpts.MetadataArrayPool(),
+		index.MetadataArrayPoolCapacity,
 		idxOpts.SegmentBuilderOptions(),
 		idxOpts.FSTSegmentOptions(),
 		compaction.CompactorOptions{
@@ -60,12 +60,16 @@ func TestNewPeersBootstrapper(t *testing.T) {
 		})
 	require.NoError(t, err)
 
+	fsOpts := fs.NewOptions()
+	icm, err := fs.NewIndexClaimsManager(fsOpts)
+	require.NoError(t, err)
 	opts := NewOptions().
 		SetFilesystemOptions(fs.NewOptions()).
 		SetIndexOptions(idxOpts).
 		SetAdminClient(client.NewMockAdminClient(ctrl)).
 		SetPersistManager(persist.NewMockManager(ctrl)).
-		SetFilesystemOptions(fs.NewOptions()).
+		SetIndexClaimsManager(icm).
+		SetFilesystemOptions(fsOpts).
 		SetCompactor(compactor).
 		SetRuntimeOptionsManager(runtime.NewMockOptionsManager(ctrl))
 

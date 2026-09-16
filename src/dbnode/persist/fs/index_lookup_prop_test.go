@@ -1,3 +1,4 @@
+//go:build big
 // +build big
 
 // Copyright (c) 2017 Uber Technologies, Inc.
@@ -29,7 +30,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
+
+	"github.com/leanovate/gopter"
+	"github.com/leanovate/gopter/gen"
+	"github.com/leanovate/gopter/prop"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/m3db/m3/src/dbnode/digest"
 	"github.com/m3db/m3/src/dbnode/persist"
@@ -37,11 +42,7 @@ import (
 	"github.com/m3db/m3/src/x/checked"
 	"github.com/m3db/m3/src/x/ident"
 	"github.com/m3db/m3/src/x/mmap"
-
-	"github.com/leanovate/gopter"
-	"github.com/leanovate/gopter/gen"
-	"github.com/leanovate/gopter/prop"
-	"github.com/stretchr/testify/assert"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 func TestIndexLookupWriteRead(t *testing.T) {
@@ -257,7 +258,8 @@ func genTagIdent() gopter.Gen {
 	})
 }
 
-func readIndexFileOffsets(shardDirPath string, numEntries int, start time.Time) (map[string]int64, error) {
+func readIndexFileOffsets(shardDirPath string, numEntries int,
+	start xtime.UnixNano) (map[string]int64, error) {
 	indexFilePath := dataFilesetPathFromTimeAndIndex(shardDirPath, start, 0, indexFileSuffix, false)
 	buf, err := ioutil.ReadFile(indexFilePath)
 	if err != nil {

@@ -23,6 +23,9 @@ package scalar
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/query/block"
 	"github.com/m3db/m3/src/query/executor/transform"
 	"github.com/m3db/m3/src/query/models"
@@ -30,15 +33,12 @@ import (
 	"github.com/m3db/m3/src/query/test"
 	"github.com/m3db/m3/src/query/test/executor"
 	"github.com/m3db/m3/src/query/test/transformtest"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestScalar(t *testing.T) {
 	val := 10.0
 	_, bounds := test.GenerateValuesAndBounds(nil, nil)
-	c, sink := executor.NewControllerWithSink(parser.NodeID(0))
+	c, sink := executor.NewControllerWithSink(parser.NodeID(rune(0)))
 	op, err := NewScalarOp(val, models.NewTagOptions())
 	require.NoError(t, err)
 

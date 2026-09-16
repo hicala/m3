@@ -23,13 +23,16 @@ package client
 import (
 	"testing"
 
-	"github.com/m3db/m3/src/x/pool"
-
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"github.com/m3db/m3/src/x/pool"
+	"github.com/m3db/m3/src/x/sampler"
 )
 
 func TestFetchStatePool(t *testing.T) {
-	p := newFetchStatePool(pool.NewObjectPoolOptions().SetSize(1))
+	p := newFetchStatePool(pool.NewObjectPoolOptions().SetSize(1),
+		zap.NewExample(), sampler.MustNewSampler(1))
 	p.Init()
 
 	s := p.Get()

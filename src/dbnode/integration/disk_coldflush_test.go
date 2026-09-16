@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2019 Uber Technologies, Inc.
@@ -26,13 +27,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
 	"github.com/m3db/m3/src/x/ident"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestDiskColdFlushSimple(t *testing.T) {
@@ -42,7 +43,7 @@ func TestDiskColdFlushSimple(t *testing.T) {
 	// Test setup with cold-writes-enabled namespace.
 	nsOpts := namespace.NewOptions().
 		SetRepairEnabled(false).
-		SetRetentionOptions(defaultIntegrationTestRetentionOpts.
+		SetRetentionOptions(DefaultIntegrationTestRetentionOpts.
 			SetRetentionPeriod(12 * time.Hour)).
 		SetColdWritesEnabled(true)
 	nsID := ident.StringID("testColdWriteNs1")
@@ -89,35 +90,35 @@ func TestDiskColdFlushSimple(t *testing.T) {
 	}
 
 	expectedDataFiles := []fs.FileSetFileIdentifier{
-		fs.FileSetFileIdentifier{
+		{
 			// warm1, start
 			Namespace:   nsID,
 			Shard:       6,
 			BlockStart:  start,
 			VolumeIndex: 0,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// warm1, start + 1
 			Namespace:   nsID,
 			Shard:       6,
 			BlockStart:  start.Add(blockSize),
 			VolumeIndex: 0,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// warm2, start
 			Namespace:   nsID,
 			Shard:       11,
 			BlockStart:  start,
 			VolumeIndex: 0,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// warm3, start + 1
 			Namespace:   nsID,
 			Shard:       2,
 			BlockStart:  start.Add(blockSize),
 			VolumeIndex: 0,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// coldWrite, start + 1
 			Namespace:   nsID,
 			Shard:       8,
@@ -128,10 +129,10 @@ func TestDiskColdFlushSimple(t *testing.T) {
 	for _, input := range warmData {
 		testSetup.SetNowFn(input.Start)
 		testData := generate.Block(input)
-		seriesMaps[xtime.ToUnixNano(input.Start)] = testData
+		seriesMaps[input.Start] = testData
 		require.NoError(t, testSetup.WriteBatch(nsID, testData))
 	}
-	startPlusOneBlockNano := xtime.ToUnixNano(start.Add(blockSize))
+	startPlusOneBlockNano := start.Add(blockSize)
 	// Remove warm data for `coldOverwrite`. See earlier comment for context.
 	seriesMaps[startPlusOneBlockNano] =
 		seriesMaps[startPlusOneBlockNano][:len(seriesMaps[startPlusOneBlockNano])-1]
@@ -156,20 +157,20 @@ func TestDiskColdFlushSimple(t *testing.T) {
 	testSetup.SetNowFn(start.Add(blockSize * 3))
 	for _, input := range coldData {
 		testData := generate.Block(input)
-		seriesMaps[xtime.ToUnixNano(input.Start)] = append(seriesMaps[xtime.ToUnixNano(input.Start)], testData...)
+		seriesMaps[input.Start] = append(seriesMaps[input.Start], testData...)
 		require.NoError(t, testSetup.WriteBatch(nsID, testData))
 	}
 	log.Debug("cold data is now written")
 
 	expectedDataFiles = []fs.FileSetFileIdentifier{
-		fs.FileSetFileIdentifier{
+		{
 			// warm1, start
 			Namespace:   nsID,
 			Shard:       6,
 			BlockStart:  start,
 			VolumeIndex: 0,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// warm2, start (creating volume 0)
 			// cold3, start (creating volume 1)
 			Namespace:   nsID,
@@ -177,56 +178,56 @@ func TestDiskColdFlushSimple(t *testing.T) {
 			BlockStart:  start,
 			VolumeIndex: 1,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// warm1, start + 1
 			Namespace:   nsID,
 			Shard:       6,
 			BlockStart:  start.Add(blockSize),
 			VolumeIndex: 0,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// warm3, start + 1
 			Namespace:   nsID,
 			Shard:       2,
 			BlockStart:  start.Add(blockSize),
 			VolumeIndex: 0,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// cold0, start - 1
 			Namespace:   nsID,
 			Shard:       2,
 			BlockStart:  start.Add(-blockSize),
 			VolumeIndex: 1,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// cold1, start
 			Namespace:   nsID,
 			Shard:       4,
 			BlockStart:  start,
 			VolumeIndex: 1,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// cold2, start
 			Namespace:   nsID,
 			Shard:       7,
 			BlockStart:  start,
 			VolumeIndex: 1,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// cold1, start + 1
 			Namespace:   nsID,
 			Shard:       4,
 			BlockStart:  start.Add(blockSize),
 			VolumeIndex: 1,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// cold3, start + 1
 			Namespace:   nsID,
 			Shard:       11,
 			BlockStart:  start.Add(blockSize),
 			VolumeIndex: 1,
 		},
-		fs.FileSetFileIdentifier{
+		{
 			// coldWrite, start + 1
 			Namespace:   nsID,
 			Shard:       8,

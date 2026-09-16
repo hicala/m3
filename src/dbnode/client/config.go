@@ -23,14 +23,17 @@ package client
 import (
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
+	"go.uber.org/zap"
+
+	cb "github.com/m3db/m3/src/dbnode/client/circuitbreaker/middleware"
 	"github.com/m3db/m3/src/dbnode/encoding"
 	"github.com/m3db/m3/src/dbnode/encoding/m3tsz"
 	"github.com/m3db/m3/src/dbnode/environment"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/topology"
+	"github.com/m3db/m3/src/x/clock"
 	xerrors "github.com/m3db/m3/src/x/errors"
 	"github.com/m3db/m3/src/x/ident"
 	"github.com/m3db/m3/src/x/instrument"
@@ -41,11 +44,6 @@ import (
 
 const (
 	asyncWriteWorkerPoolDefaultSize = 128
-)
-
-var (
-	errConfigurationMustSupplyConfig = errors.New(
-		"must supply config when no topology initializer parameter supplied")
 )
 
 // Configuration is a configuration that can be used to construct a client.
@@ -79,6 +77,12 @@ type Configuration struct {
 
 	// LogErrorSampleRate is the log error sample rate.
 	LogErrorSampleRate sampler.Rate `yaml:"logErrorSampleRate"`
+
+	// LogHostWriteErrorSampleRate is the log write error per host sample rate.
+	LogHostWriteErrorSampleRate sampler.Rate `yaml:"logHostWriteErrorSampleRate"`
+
+	// LogHostFetchErrorSampleRate is the log fetch error per host sample rate.
+	LogHostFetchErrorSampleRate sampler.Rate `yaml:"logHostFetchErrorSampleRate"`
 
 	// BackgroundHealthCheckFailLimit is the amount of times a background check
 	// must fail before a connection is taken out of consideration.
@@ -122,6 +126,16 @@ type Configuration struct {
 	// ShardsLeavingCountTowardsConsistency sets whether or not writes to leaving shards
 	// count towards consistency, by default they do not.
 	ShardsLeavingCountTowardsConsistency *bool `yaml:"shardsLeavingCountTowardsConsistency"`
+
+	// ShardsLeavingAndInitializingCountTowardsConsistency sets whether or not writes to leaving and initializing shards
+	// count towards consistency, by default they do not.
+	ShardsLeavingAndInitializingCountTowardsConsistency *bool `yaml:"shardsLeavingAndInitializingCountTowardsConsistency"`
+
+	// IterateEqualTimestampStrategy specifies the iterate equal timestamp strategy.
+	IterateEqualTimestampStrategy *encoding.IterateEqualTimestampStrategy `yaml:"iterateEqualTimestampStrategy"`
+
+	// CircuitBreakerConfig is the configuration for the circuit breaker middleware.
+	CircuitBreakerConfig *cb.Config `yaml:"circuitBreakerConfig"`
 }
 
 // ProtoConfiguration is the configuration for running with ProtoDataMode enabled.
@@ -182,7 +196,7 @@ func (c *Configuration) Validate() error {
 	}
 
 	if err := c.LogErrorSampleRate.Validate(); err != nil {
-		return fmt.Errorf("m3db client error validating log error sample rate: %v", err)
+		return fmt.Errorf("m3db client error validating log error sample rate: %w", err)
 	}
 
 	if c.BackgroundHealthCheckFailLimit != nil &&
@@ -209,8 +223,14 @@ func (c *Configuration) Validate() error {
 			*c.AsyncWriteMaxConcurrency)
 	}
 
+	if c.ShardsLeavingCountTowardsConsistency != nil && c.ShardsLeavingAndInitializingCountTowardsConsistency != nil &&
+		*c.ShardsLeavingCountTowardsConsistency && *c.ShardsLeavingAndInitializingCountTowardsConsistency {
+		return fmt.Errorf("m3db client cannot have both shardsLeavingCountTowardsConsistency and " +
+			"shardsLeavingAndInitializingCountTowardsConsistency as true")
+	}
+
 	if err := c.Proto.Validate(); err != nil {
-		return fmt.Errorf("error validating M3DB client proto configuration: %v", err)
+		return fmt.Errorf("error validating M3DB client proto configuration: %w", err)
 	}
 
 	return nil
@@ -229,6 +249,10 @@ type ConfigurationParameters struct {
 	// InstrumentOptions is a required argument when
 	// constructing a client from configuration.
 	InstrumentOptions instrument.Options
+
+	// ClockOptions is an optional argument when
+	// constructing a client from configuration.
+	ClockOptions clock.Options
 
 	// TopologyInitializer is an optional argument when
 	// constructing a client from configuration.
@@ -287,7 +311,8 @@ func (c Configuration) NewAdminClient(
 	fetchRequestScope := iopts.MetricsScope().SubScope("fetch-req")
 
 	cfgParams := environment.ConfigurationParameters{
-		InstrumentOpts: iopts,
+		InstrumentOpts:                     iopts,
+		AllowEmptyInitialNamespaceRegistry: true,
 	}
 	if c.HashingConfiguration != nil {
 		cfgParams.HashingSeed = c.HashingConfiguration.Seed
@@ -302,10 +327,12 @@ func (c Configuration) NewAdminClient(
 	)
 
 	var buildAsyncPool bool
+	var envCfgs environment.ConfigureResults
 	if syncTopoInit == nil {
-		envCfgs, err := c.EnvironmentConfig.Configure(cfgParams)
+		var err error
+		envCfgs, err = c.EnvironmentConfig.Configure(cfgParams)
 		if err != nil {
-			err = fmt.Errorf("unable to create topology initializer, err: %v", err)
+			err = fmt.Errorf("unable to create topology initializer, err: %w", err)
 			return nil, err
 		}
 
@@ -327,7 +354,22 @@ func (c Configuration) NewAdminClient(
 		SetNamespaceInitializer(syncNsInit).
 		SetAsyncTopologyInitializers(asyncTopoInits).
 		SetInstrumentOptions(iopts).
-		SetLogErrorSampleRate(c.LogErrorSampleRate)
+		SetLogErrorSampleRate(c.LogErrorSampleRate).
+		SetLogHostWriteErrorSampleRate(c.LogHostWriteErrorSampleRate).
+		SetLogHostFetchErrorSampleRate(c.LogHostFetchErrorSampleRate)
+
+	// Set up circuit breaker provider using environment configuration
+	provider, err := c.setupCircuitBreakerProvider(envCfgs, iopts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set up circuit breaker provider: %w", err)
+	}
+	if provider != nil {
+		v = v.SetMiddlewareEnableProvider(provider)
+	}
+
+	if params.ClockOptions != nil {
+		v = v.SetClockOptions(params.ClockOptions)
+	}
 
 	if c.UseV2BatchAPIs != nil {
 		v = v.SetUseV2BatchAPIs(*c.UseV2BatchAPIs)
@@ -347,7 +389,7 @@ func (c Configuration) NewAdminClient(
 			SetInstrumentOptions(workerPoolInstrumentOpts)
 		workerPool, err := xsync.NewPooledWorkerPool(size, workerPoolOpts)
 		if err != nil {
-			return nil, fmt.Errorf("unable to create async worker pool: %v", err)
+			return nil, fmt.Errorf("unable to create async worker pool: %w", err)
 		}
 		workerPool.Init()
 		v = v.SetAsyncWriteWorkerPool(workerPool)
@@ -364,7 +406,7 @@ func (c Configuration) NewAdminClient(
 		v = v.SetReadConsistencyLevel(*c.ReadConsistencyLevel)
 	}
 	if c.ConnectConsistencyLevel != nil {
-		v.SetClusterConnectConsistencyLevel(*c.ConnectConsistencyLevel)
+		v = v.SetClusterConnectConsistencyLevel(*c.ConnectConsistencyLevel)
 	}
 	if c.BackgroundHealthCheckFailLimit != nil {
 		v = v.SetBackgroundHealthCheckFailLimit(*c.BackgroundHealthCheckFailLimit)
@@ -406,15 +448,18 @@ func (c Configuration) NewAdminClient(
 		v = v.SetHostQueueOpsFlushInterval(*syncClientOverrides.HostQueueFlushInterval)
 	}
 
+	if c.IterateEqualTimestampStrategy != nil {
+		o := v.IterationOptions()
+		o.IterateEqualTimestampStrategy = *c.IterateEqualTimestampStrategy
+		v = v.SetIterationOptions(o)
+	}
+
 	encodingOpts := params.EncodingOptions
 	if encodingOpts == nil {
 		encodingOpts = encoding.NewOptions()
 	}
 
-	v = v.SetReaderIteratorAllocate(func(r io.Reader, _ namespace.SchemaDescr) encoding.ReaderIterator {
-		intOptimized := m3tsz.DefaultIntOptimizationEnabled
-		return m3tsz.NewReaderIterator(r, intOptimized, encodingOpts)
-	})
+	v = v.SetReaderIteratorAllocate(m3tsz.DefaultReaderIteratorAllocFn(encodingOpts))
 
 	if c.Proto != nil && c.Proto.Enabled {
 		v = v.SetEncodingProto(encodingOpts)
@@ -433,8 +478,16 @@ func (c Configuration) NewAdminClient(
 	if c.WriteShardsInitializing != nil {
 		v = v.SetWriteShardsInitializing(*c.WriteShardsInitializing)
 	}
+	if c.ShardsLeavingAndInitializingCountTowardsConsistency != nil {
+		v = v.SetShardsLeavingAndInitializingCountTowardsConsistency(*c.ShardsLeavingAndInitializingCountTowardsConsistency)
+	}
+
 	if c.ShardsLeavingCountTowardsConsistency != nil {
 		v = v.SetShardsLeavingCountTowardsConsistency(*c.ShardsLeavingCountTowardsConsistency)
+	}
+
+	if c.CircuitBreakerConfig != nil {
+		v = v.SetMiddlewareCircuitbreakerConfig(*c.CircuitBreakerConfig)
 	}
 
 	// Cast to admin options to apply admin config options.
@@ -458,4 +511,25 @@ func (c Configuration) NewAdminClient(
 
 	asyncClusterOpts := NewOptionsForAsyncClusters(opts, asyncTopoInits, asyncClientOverrides)
 	return NewAdminClient(opts, asyncClusterOpts...)
+}
+
+// setupCircuitBreakerProvider sets up the circuit breaker middleware provider
+// using environment configuration. Returns nil if no provider can be set up.
+func (c Configuration) setupCircuitBreakerProvider(envCfgs environment.ConfigureResults,
+	iopts instrument.Options) (cb.EnableProvider, error) {
+	// Check if we have environment configs and KV store
+	if len(envCfgs) == 0 || envCfgs[0].KVStore == nil {
+		return cb.NewNopEnableProvider(), nil
+	}
+
+	// Create a single provider instance
+	provider := cb.NewEnableProvider()
+
+	// Set up circuit breaker middleware config watch
+	if err := provider.WatchConfig(envCfgs[0].KVStore, iopts.Logger()); err != nil {
+		iopts.Logger().Warn("failed to set up circuit breaker middleware config watch", zap.Error(err))
+		return nil, fmt.Errorf("failed to set up circuit breaker middleware config watch: %w", err)
+	}
+
+	return provider, nil
 }

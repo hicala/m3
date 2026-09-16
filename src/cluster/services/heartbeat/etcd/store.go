@@ -27,6 +27,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang/protobuf/proto"
+	"github.com/uber-go/tally"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
+	"golang.org/x/net/context"
+
 	"github.com/m3db/m3/src/cluster/etcd/watchmanager"
 	"github.com/m3db/m3/src/cluster/generated/proto/placementpb"
 	"github.com/m3db/m3/src/cluster/kv"
@@ -34,12 +40,6 @@ import (
 	"github.com/m3db/m3/src/cluster/services"
 	"github.com/m3db/m3/src/x/retry"
 	"github.com/m3db/m3/src/x/watch"
-
-	"go.etcd.io/etcd/clientv3"
-	"github.com/golang/protobuf/proto"
-	"github.com/uber-go/tally"
-	"go.uber.org/zap"
-	"golang.org/x/net/context"
 )
 
 const (
@@ -80,7 +80,7 @@ func NewStore(c *clientv3.Client, opts Options) (services.HeartbeatService, erro
 	}
 
 	wOpts := watchmanager.NewOptions().
-		SetWatcher(c.Watcher).
+		SetClient(c).
 		SetUpdateFn(store.update).
 		SetTickAndStopFn(store.tickAndStop).
 		SetWatchOptions([]clientv3.OpOption{

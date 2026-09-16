@@ -25,8 +25,14 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gogo/protobuf/proto"
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/m3db/m3/src/dbnode/digest"
 	"github.com/m3db/m3/src/dbnode/generated/proto/pagetoken"
@@ -36,15 +42,12 @@ import (
 	"github.com/m3db/m3/src/dbnode/storage/series"
 	"github.com/m3db/m3/src/x/checked"
 	"github.com/m3db/m3/src/x/ident"
-
-	"github.com/gogo/protobuf/proto"
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	xtest "github.com/m3db/m3/src/x/test"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyCacheAll(t *testing.T) {
-	ctrl := gomock.NewController(t)
+	ctrl := xtest.NewController(t)
 	defer ctrl.Finish()
 
 	opts := DefaultTestOptions().SetSeriesCachePolicy(series.CacheAll)
@@ -53,7 +56,7 @@ func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyCacheAll(t *testing.T) {
 
 	shard := testDatabaseShard(t, opts)
 	defer shard.Close()
-	start := time.Now()
+	start := xtime.Now()
 	end := start.Add(defaultTestRetentionOpts.BlockSize())
 
 	fetchLimit := int64(5)
@@ -68,8 +71,9 @@ func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyCacheAll(t *testing.T) {
 	seriesFetchOpts := series.FetchBlocksMetadataOptions{
 		FetchBlocksMetadataOptions: fetchOpts,
 	}
-	lastRead := time.Now().Add(-time.Minute)
+	lastRead := xtime.Now().Add(-time.Minute)
 	for i := int64(0); i < 10; i++ {
+		entryIndex := i + 1
 		id := ident.StringID(fmt.Sprintf("foo.%d", i))
 		tags := ident.NewTags(
 			ident.StringTag("aaa", "bbb"),
@@ -77,12 +81,12 @@ func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyCacheAll(t *testing.T) {
 		)
 		tagsIter := ident.NewTagsIterator(tags)
 		series := addMockSeries(ctrl, shard, id, tags, uint64(i))
-		if i == startCursor {
+		if entryIndex == startCursor {
 			series.EXPECT().
 				FetchBlocksMetadata(gomock.Not(nil), start, end, seriesFetchOpts).
 				Return(block.NewFetchBlocksMetadataResult(id, tagsIter,
 					block.NewFetchBlockMetadataResults()), nil)
-		} else if i > startCursor && i <= startCursor+fetchLimit {
+		} else if entryIndex > startCursor && entryIndex <= startCursor+fetchLimit {
 			ids = append(ids, id)
 			blocks := block.NewFetchBlockMetadataResults()
 			at := start.Add(time.Duration(i))
@@ -127,7 +131,7 @@ func (b fetchBlockMetadataResultByStart) Less(i, j int) bool {
 }
 
 func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyNotCacheAll(t *testing.T) {
-	ctrl := gomock.NewController(t)
+	ctrl := xtest.NewController(t)
 	defer ctrl.Finish()
 
 	opts := DefaultTestOptions().SetSeriesCachePolicy(series.CacheRecentlyRead)
@@ -142,7 +146,7 @@ func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyNotCacheAll(t *testing.T
 	ropts := defaultTestRetentionOpts
 	blockSize := ropts.BlockSize()
 	retentionPeriod := ropts.RetentionPeriod()
-	now := time.Now()
+	now := xtime.Now()
 	mostRecentBlockStart := now.Truncate(blockSize)
 	start := mostRecentBlockStart.Add(-retentionPeriod)
 	end := mostRecentBlockStart.Add(blockSize)
@@ -181,7 +185,7 @@ func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyNotCacheAll(t *testing.T
 		require.NoError(t, err)
 
 		for i := 0; i < numFlushedSeries; i++ {
-			idxBlock := time.Duration(at.UnixNano()-start.UnixNano()) / blockSize
+			idxBlock := time.Duration(at-start) / blockSize
 			if (idxBlock%2 == 0 && i%2 == 0) || (idxBlock%2 != 0 && i%2 != 0) {
 				continue // Every other block skip the evens and odds
 			}
@@ -201,7 +205,7 @@ func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyNotCacheAll(t *testing.T
 			require.NoError(t, err)
 
 			blockMetadataResult := block.NewFetchBlockMetadataResult(at,
-				int64(len(data)), &checksum, time.Time{}, nil)
+				int64(len(data)), &checksum, 0, nil)
 			expected[id.String()] = append(expected[id.String()], blockMetadataResult)
 		}
 
@@ -213,7 +217,7 @@ func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyNotCacheAll(t *testing.T
 	seriesFetchOpts := series.FetchBlocksMetadataOptions{
 		FetchBlocksMetadataOptions: fetchOpts,
 	}
-	lastRead := time.Now().Add(-time.Minute)
+	lastRead := xtime.Now().Add(-time.Minute)
 	for i := 0; i < numActiveSeries; i++ {
 		id := ident.StringID(fmt.Sprintf("series+instance=%d", i))
 		tags := ident.NewTags(
@@ -293,5 +297,97 @@ func TestShardFetchBlocksMetadataV2WithSeriesCachePolicyNotCacheAll(t *testing.T
 			assert.True(t, expectedBlock.LastRead.Equal(actualBlock.LastRead))
 			assert.Equal(t, expectedBlock.Err, actualBlock.Err)
 		}
+	}
+}
+
+func TestShardFetchBlocksMetadata(t *testing.T) {
+
+	tests := []struct {
+		name              string
+		numOfActiveSeries int
+		WriteBatchSize    int
+		readBatchSize     int
+	}{
+		{name: "Test-case 1", numOfActiveSeries: 1000, WriteBatchSize: 10, readBatchSize: 10},
+		{name: "Test-case 2", numOfActiveSeries: 1000, WriteBatchSize: 7, readBatchSize: 19},
+		{name: "Test-case 3", numOfActiveSeries: 4000, WriteBatchSize: 9, readBatchSize: 7},
+		{name: "Test-case 4", numOfActiveSeries: 5000, WriteBatchSize: 121, readBatchSize: 151},
+		{name: "Test-case 5", numOfActiveSeries: 30000, WriteBatchSize: 1021, readBatchSize: 4096},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := DefaultTestOptions().SetSeriesCachePolicy(series.CacheRecentlyRead)
+			shard := testDatabaseShard(t, opts)
+			defer shard.Close() //nolint:errcheck
+			nowFn := opts.ClockOptions().NowFn()
+			start := nowFn()
+			writeTestData(t, tc.numOfActiveSeries, tc.WriteBatchSize, shard, opts)
+			end := nowFn()
+			verifyFetchedBlockMetadata(t, tc.numOfActiveSeries, tc.readBatchSize, shard, opts, start, end)
+		})
+	}
+}
+
+func writeTestData(t *testing.T, numOfActiveSeries int, writeBatchSize int, shard *dbShard, opts Options) {
+	ctx := opts.ContextPool().Get()
+	defer ctx.Close()
+	nowFn := opts.ClockOptions().NowFn()
+	var wg sync.WaitGroup
+	for i := 0; i < numOfActiveSeries; i += writeBatchSize {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			size := writeBatchSize
+			if numOfActiveSeries-i < writeBatchSize {
+				size = numOfActiveSeries - i
+			}
+			for j := 0; j < size; j++ {
+				id := fmt.Sprintf("foo=%d_%d", i, j)
+				_, err := shard.Write(ctx, ident.StringID(id), xtime.ToUnixNano(nowFn()),
+					1.0, xtime.Second, nil, series.WriteOptions{})
+				require.NoError(t, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+func verifyFetchedBlockMetadata(t *testing.T, numOfActiveSeries int,
+	readBatchSize int, shard *dbShard, opts Options, start, end time.Time) {
+	ctx := opts.ContextPool().Get()
+	var (
+		encodedPageToken PageToken
+		err              error
+		result           block.FetchBlocksMetadataResults
+	)
+
+	fetchMetadata := true
+	observedIds := make(map[string]int, numOfActiveSeries)
+	fetchOpts := block.FetchBlocksMetadataOptions{
+		IncludeSizes:     true,
+		IncludeChecksums: true,
+		IncludeLastRead:  true,
+	}
+
+	for i := 0; i < numOfActiveSeries; i += readBatchSize {
+		if fetchMetadata {
+			result, encodedPageToken, err = shard.FetchBlocksMetadataV2(ctx, xtime.ToUnixNano(start), xtime.ToUnixNano(end),
+				int64(readBatchSize), encodedPageToken, fetchOpts)
+			require.NoError(t, err)
+			for _, res := range result.Results() {
+				observedIds[res.ID.String()]++
+			}
+		} else {
+			break
+		}
+		if encodedPageToken == nil {
+			fetchMetadata = false
+		}
+	}
+
+	require.Equal(t, numOfActiveSeries, len(observedIds))
+	for id := range observedIds {
+		require.Equal(t, 1, observedIds[id])
 	}
 }

@@ -26,6 +26,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/cluster/client"
 	"github.com/m3db/m3/src/cluster/kv"
 	nsproto "github.com/m3db/m3/src/dbnode/generated/proto/namespace"
@@ -33,10 +37,6 @@ import (
 	"github.com/m3db/m3/src/x/instrument"
 	xjson "github.com/m3db/m3/src/x/json"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func setupNamespaceTest(t *testing.T, ctrl *gomock.Controller) (*client.MockClient, *kv.MockStore) {
@@ -82,8 +82,7 @@ func TestNamespaceGetHandler(t *testing.T) {
 	req.Header.Set(headers.HeaderClusterEnvironmentName, "test_env")
 	require.NotNil(t, req)
 
-	extendedOpts, err := xtest.NewExtendedOptionsProto("foo")
-	require.NoError(t, err)
+	extendedOpts := xtest.NewTestExtendedOptionsProto("foo")
 
 	registry := nsproto.Registry{
 		Namespaces: map[string]*nsproto.NamespaceOptions{
@@ -145,7 +144,7 @@ func TestNamespaceGetHandler(t *testing.T) {
 						"snapshotEnabled":   true,
 						"stagingState":      xjson.Map{"status": "READY"},
 						"writesToCommitLog": true,
-						"extendedOptions":   xtest.NewExtendedOptionsJson("foo"),
+						"extendedOptions":   xtest.NewTestExtendedOptionsJSON("foo"),
 					},
 				},
 			},

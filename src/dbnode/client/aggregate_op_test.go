@@ -21,12 +21,13 @@
 package client
 
 import (
+	"context"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/m3db/m3/src/dbnode/generated/thrift/rpc"
 	"github.com/m3db/m3/src/x/pool"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestAggregateOpPool(t *testing.T) {
@@ -55,7 +56,7 @@ func TestAggregateOp(t *testing.T) {
 		require.Equal(t, err, e)
 		count++
 	}
-	op.update(rpc.AggregateQueryRawRequest{}, fn)
+	op.update(context.Background(), rpc.AggregateQueryRawRequest{}, fn)
 	op.CompletionFn()(inter, err)
 	require.Equal(t, 1, count)
 }

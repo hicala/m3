@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2017 Uber Technologies, Inc.
@@ -26,11 +27,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/retention"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestCommitLogBootstrapWithSnapshots(t *testing.T) {
@@ -98,8 +99,8 @@ func testCommitLogBootstrapWithSnapshots(t *testing.T, setTestOpts setTestOption
 		snapshotInterval            = 10 * time.Second
 		numDatapointsNotInSnapshots = 0
 		pred                        = func(dp generate.TestValue) bool {
-			blockStart := dp.Timestamp.Truncate(blockSize)
-			if dp.Timestamp.Before(blockStart.Add(snapshotInterval)) {
+			blockStart := dp.TimestampNanos.Truncate(blockSize)
+			if dp.TimestampNanos.Before(blockStart.Add(snapshotInterval)) {
 				return true
 			}
 
@@ -113,8 +114,9 @@ func testCommitLogBootstrapWithSnapshots(t *testing.T, setTestOpts setTestOption
 
 	numDatapointsNotInCommitLogs := 0
 	writeCommitLogDataWithPredicate(t, setup, commitLogOpts, seriesMaps, ns1, func(dp generate.TestValue) bool {
-		blockStart := dp.Timestamp.Truncate(blockSize)
-		if dp.Timestamp.Equal(blockStart.Add(snapshotInterval)) || dp.Timestamp.After(blockStart.Add(snapshotInterval)) {
+		blockStart := dp.TimestampNanos.Truncate(blockSize)
+		if dp.TimestampNanos.Equal(blockStart.Add(snapshotInterval)) ||
+			dp.TimestampNanos.After(blockStart.Add(snapshotInterval)) {
 			return true
 		}
 

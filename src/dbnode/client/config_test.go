@@ -21,23 +21,31 @@
 package client
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/m3db/m3/src/dbnode/topology"
-	xconfig "github.com/m3db/m3/src/x/config"
-	"github.com/m3db/m3/src/x/retry"
-
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	etcdclient "github.com/m3db/m3/src/cluster/client/etcd"
+	"github.com/m3db/m3/src/cluster/kv"
+	"github.com/m3db/m3/src/dbnode/encoding"
+	"github.com/m3db/m3/src/dbnode/environment"
+	"github.com/m3db/m3/src/dbnode/topology"
+	xconfig "github.com/m3db/m3/src/x/config"
+	"github.com/m3db/m3/src/x/instrument"
+	"github.com/m3db/m3/src/x/retry"
 )
 
 func TestConfiguration(t *testing.T) {
 	in := `
 writeConsistencyLevel: majority
 readConsistencyLevel: unstrict_majority
+iterateEqualTimestampStrategy: iterate_lowest_value
 connectConsistencyLevel: any
 writeTimeout: 10s
 fetchTimeout: 15s
@@ -84,6 +92,7 @@ proto:
 	var (
 		levelMajority        = topology.ConsistencyLevelMajority
 		readUnstrictMajority = topology.ReadConsistencyLevelUnstrictMajority
+		iterateLowestValue   = encoding.IterateLowestValue
 		connectAny           = topology.ConnectConsistencyLevelAny
 		second10             = 10 * time.Second
 		second15             = 15 * time.Second
@@ -94,12 +103,13 @@ proto:
 	)
 
 	expected := Configuration{
-		WriteConsistencyLevel:   &levelMajority,
-		ReadConsistencyLevel:    &readUnstrictMajority,
-		ConnectConsistencyLevel: &connectAny,
-		WriteTimeout:            &second10,
-		FetchTimeout:            &second15,
-		ConnectTimeout:          &second20,
+		WriteConsistencyLevel:         &levelMajority,
+		ReadConsistencyLevel:          &readUnstrictMajority,
+		IterateEqualTimestampStrategy: &iterateLowestValue,
+		ConnectConsistencyLevel:       &connectAny,
+		WriteTimeout:                  &second10,
+		FetchTimeout:                  &second15,
+		ConnectTimeout:                &second20,
 		WriteRetry: &retry.Configuration{
 			InitialBackoff: 500 * time.Millisecond,
 			BackoffFactor:  3,
@@ -127,4 +137,68 @@ proto:
 	}
 
 	assert.Equal(t, expected, cfg)
+}
+
+func TestValidateConfig(t *testing.T) {
+	var (
+		boolTrue = true
+	)
+
+	config := Configuration{
+		ShardsLeavingCountTowardsConsistency:                &boolTrue,
+		ShardsLeavingAndInitializingCountTowardsConsistency: &boolTrue,
+	}
+	err := config.Validate()
+	require.Error(t, err)
+	require.Equal(t, err, fmt.Errorf("m3db client cannot have both shardsLeavingCountTowardsConsistency and "+
+		"shardsLeavingAndInitializingCountTowardsConsistency as true"))
+}
+
+func TestCircuitBreakerMiddlewareConfig(t *testing.T) {
+	t.Run("success case", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockStore := kv.NewMockStore(ctrl)
+		mockWatch := kv.NewMockValueWatch(ctrl)
+		mockValue := kv.NewMockValue(ctrl)
+
+		// Set up mock expectations for success case
+		mockStore.EXPECT().Watch(gomock.Any()).Return(mockWatch, nil).AnyTimes()
+		mockStore.EXPECT().Get(gomock.Any()).Return(mockValue, nil).AnyTimes()
+		mockValue.EXPECT().Unmarshal(gomock.Any()).Return(nil).AnyTimes()
+
+		// Create environment config with required etcd settings
+		envCfg := environment.Configuration{
+			Services: environment.DynamicConfiguration{
+				&environment.DynamicCluster{
+					Service: &etcdclient.Configuration{
+						Zone:     "test",
+						Env:      "test",
+						Service:  "m3db",
+						CacheDir: "/tmp/m3kv",
+						ETCDClusters: []etcdclient.ClusterConfig{
+							{
+								Zone:      "test",
+								Endpoints: []string{"localhost:2379"},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		cfg := Configuration{
+			EnvironmentConfig: &envCfg,
+		}
+
+		params := ConfigurationParameters{
+			InstrumentOptions: instrument.NewOptions(),
+		}
+
+		// Test successful case
+		client, err := cfg.NewClient(params)
+		require.NoError(t, err)
+		require.NotNil(t, client)
+	})
 }

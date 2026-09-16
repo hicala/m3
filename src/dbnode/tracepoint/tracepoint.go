@@ -34,12 +34,6 @@ const (
 	// Query is the operation name for the tchannelthrift Query path.
 	Query = "tchannelthrift/node.service.Query"
 
-	// FetchReadEncoded is the operation name for the tchannelthrift FetchReadEncoded path.
-	FetchReadEncoded = "tchannelthrift/node.service.FetchReadEncoded"
-
-	// FetchReadResults is the operation name for the tchannelthrift FetchReadResults path.
-	FetchReadResults = "tchannelthrift/node.service.FetchReadResults"
-
 	// FetchReadSingleResult is the operation name for the tchannelthrift FetchReadSingleResult path.
 	FetchReadSingleResult = "tchannelthrift/node.service.FetchReadSingleResult"
 
@@ -55,15 +49,6 @@ const (
 	// DBAggregateQuery is the operation name for the db AggregateQuery path.
 	DBAggregateQuery = "storage.db.AggregateQuery"
 
-	// DBReadEncoded is the operation name for the db ReadEncoded path.
-	DBReadEncoded = "storage.db.ReadEncoded"
-
-	// DBWideQuery is the operation name for the db WideQuery path.
-	DBWideQuery = "storage.db.WideQuery"
-
-	// DBReadMismatches is the operation name for the db ReadMismatches path.
-	DBReadMismatches = "storage.db.ReadMismatches"
-
 	// DBFetchBlocks is the operation name for the db FetchBlocks path.
 	DBFetchBlocks = "storage.db.FetchBlocks"
 
@@ -73,9 +58,6 @@ const (
 	// DBWriteBatch is the operation name for the db WriteBatch path.
 	DBWriteBatch = "storage.db.WriteBatch"
 
-	// DBIndexChecksum is the operation name for the tchannelthrift IndexChecksum path.
-	DBIndexChecksum = "storage.db.IndexChecksum"
-
 	// DBFetchMismatch is the operation name for the tchannelthrift DBFetchMismatch path.
 	DBFetchMismatch = "storage.db.FetchMismatch"
 
@@ -84,9 +66,6 @@ const (
 
 	// NSQueryIDs is the operation name for the dbNamespace QueryIDs path.
 	NSQueryIDs = "storage.dbNamespace.QueryIDs"
-
-	// NSWideQueryIDs is the operation name for the dbNamespace WideQueryIDs path.
-	NSWideQueryIDs = "storage.nsIndex.WideQueryIDs"
 
 	// NSPrepareBootstrap is the operation name for the dbNamespace PrepareBootstrap path.
 	NSPrepareBootstrap = "storage.dbNamespace.PrepareBootstrap"
@@ -103,9 +82,6 @@ const (
 	// NSIdxQuery is the operation name for the nsIndex Query path.
 	NSIdxQuery = "storage.nsIndex.Query"
 
-	// NSIdxWideQuery is the operation name for the nsIndex WideQuery path.
-	NSIdxWideQuery = "storage.nsIndex.WideQuery"
-
 	// NSIdxAggregateQuery is the operation name for the nsIndex AggregateQuery path.
 	NSIdxAggregateQuery = "storage.nsIndex.AggregateQuery"
 
@@ -117,6 +93,20 @@ const (
 
 	// NSIdxBlockAggregateQuery is the operation name for the nsIndex block aggregate query path.
 	NSIdxBlockAggregateQuery = "storage.nsIndex.blockAggregateQuery"
+
+	// NSIdxBlockQueryAddDocuments is the operation name for adding documents by batch in the block query path.
+	NSIdxBlockQueryAddDocuments = "storage.nsIndex.blockQueryAddDocuments"
+
+	// NSIdxBlockAggregateQueryAddDocuments is the operation name for adding documents by batch in the agg query path.
+	NSIdxBlockAggregateQueryAddDocuments = "storage.nsIndex.blockAggregateQueryAddDocuments"
+
+	// SearchExecutorIndexSearch is the operation name for searching on individual segment,
+	// in practice executed in the block query path.
+	SearchExecutorIndexSearch = "search.executor.IndexSearch"
+
+	// FieldTermsIteratorIndexSearch is the operation name for searching fields,
+	// in practice executed in the aggregate query path.
+	FieldTermsIteratorIndexSearch = "storage.index.fieldTermsIterator.IndexSearch"
 
 	// BlockQuery is the operation name for the index block query path.
 	BlockQuery = "storage/index.block.Query"
@@ -141,4 +131,7 @@ const (
 
 	// BootstrapperFilesystemSourceMigrator is the operation for filesystem migrator path.
 	BootstrapperFilesystemSourceMigrator = "bootstrapper.fs.filesystemSource.Migrator"
+
+	// WorkerPoolWait is the operation name for the waiting that occurs for a worker pool.
+	WorkerPoolWait = "x.sync.WorkerPoolWait"
 )

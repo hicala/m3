@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2018 Uber Technologies, Inc.
@@ -26,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/retention"
@@ -37,8 +40,6 @@ import (
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/ident"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 // TestBootstrapBeforeBufferRotationNoTick was added as a regression test after we identified
@@ -55,14 +56,16 @@ import (
 // which hadn't already been ticked get drained, but the vast majority remain undrained.
 // Once the tick finishes, the node begins flushing the 12PM->2PM block because the main
 // requirements for performing a flush are as follows:
-// 		1) currentTime > blockStart.Add(blockSize).Add(bufferPast)
-// 		2) node is not bootstrapping (technically shard is not bootstrapping)
-// 		3) at least one complete tick has occurred since blockStart.Add(blockSize).Add(bufferPast)
+//  1. currentTime > blockStart.Add(blockSize).Add(bufferPast)
+//  2. node is not bootstrapping (technically shard is not bootstrapping)
+//  3. at least one complete tick has occurred since blockStart.Add(blockSize).Add(bufferPast)
+//
 // This flush will lose a large portion of the bootstrapped data because its still stuck in
 // the undrained series buffer 12PM->12PM bucket. As a result, it became clear that a four invariant
 // needed to be maintained:
-//		4) at least one complete tick has occurred since bootstrap completed (can be the same tick
-// 		   that satisfies condition #3)
+//  4. at least one complete tick has occurred since bootstrap completed (can be the same tick
+//     that satisfies condition #3)
+//
 // This integration test ensures that we handle that situation properly by writing out
 // a commitlog file that has a single write in the active block, then it starts the node
 // and ensures that a tick starts before bootstrap begins and ends after bootstrap ends.
@@ -103,11 +106,11 @@ func TestBootstrapBeforeBufferRotationNoTick(t *testing.T) {
 	setup.SetNowFn(now)
 	startTime := now
 	commitlogWrite := ts.Datapoint{
-		Timestamp: startTime.Add(time.Second),
-		Value:     1,
+		TimestampNanos: startTime.Add(time.Second),
+		Value:          1,
 	}
 	seriesMaps := map[xtime.UnixNano]generate.SeriesBlock{
-		xtime.ToUnixNano(startTime): generate.SeriesBlock{
+		startTime: {
 			generate.Series{
 				ID:   testID,
 				Data: []generate.TestValue{{Datapoint: commitlogWrite}},
@@ -192,10 +195,8 @@ func TestBootstrapBeforeBufferRotationNoTick(t *testing.T) {
 		// tick.
 		time.Sleep(existingOptions.TickMinimumInterval() * 10)
 
-		// Twice because the test bootstrapper will need to run two times, once to fulfill
-		// all historical blocks and once to fulfill the active block.
-		signalCh <- struct{}{}
-		signalCh <- struct{}{}
+		// Close signalCh to unblock bootstrapper and run the bootstrap till the end
+		close(signalCh)
 	}()
 	require.NoError(t, setup.StartServer()) // Blocks until bootstrap is complete
 
@@ -211,7 +212,7 @@ func TestBootstrapBeforeBufferRotationNoTick(t *testing.T) {
 
 	// Verify in-memory data match what we expect - commitlog write should not be lost
 	expectedSeriesMaps := map[xtime.UnixNano]generate.SeriesBlock{
-		xtime.ToUnixNano(commitlogWrite.Timestamp.Truncate(blockSize)): generate.SeriesBlock{
+		commitlogWrite.TimestampNanos.Truncate(blockSize): {
 			generate.Series{
 				ID:   testID,
 				Data: []generate.TestValue{{Datapoint: commitlogWrite}},

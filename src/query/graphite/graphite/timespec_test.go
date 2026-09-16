@@ -50,17 +50,22 @@ func TestParseTime(t *testing.T) {
 		{"midnight", time.Date(2013, time.April, 3, 0, 0, 0, 0, time.UTC)},
 		{"midnight+1h", time.Date(2013, time.April, 3, 1, 0, 0, 0, time.UTC)},
 		{"april08+1d", time.Date(2013, time.April, 9, 4, 5, 0, 0, time.UTC)},
+		{"april08+1day", time.Date(2013, time.April, 9, 4, 5, 0, 0, time.UTC)},
 		{"monday", time.Date(2013, time.April, 1, 4, 5, 0, 0, time.UTC)},
 		{"9am monday", time.Date(2013, time.April, 1, 9, 0, 0, 0, time.UTC)},
 		{"9am monday +5min", time.Date(2013, time.April, 1, 9, 5, 0, 0, time.UTC)},
+		{"9am monday +5mins", time.Date(2013, time.April, 1, 9, 5, 0, 0, time.UTC)},
 		{"9:00am monday +5min", time.Date(2013, time.April, 1, 9, 5, 0, 0, time.UTC)},
 	}
 
 	for _, test := range tests {
-		s := test.timespec
-		parsed, err := ParseTime(s, relativeTo, 0)
-		assert.Nil(t, err, "error parsing %s", s)
-		assert.Equal(t, test.expectedTime, parsed, "incorrect parsed value for %s", s)
+		test := test
+		t.Run(test.timespec, func(t *testing.T) {
+			s := test.timespec
+			parsed, err := ParseTime(s, relativeTo, 0)
+			assert.Nil(t, err, "error parsing %s", s)
+			assert.True(t, test.expectedTime.Equal(parsed), "incorrect parsed value for %s", s)
+		})
 	}
 }
 
@@ -93,6 +98,7 @@ func TestParseOffset(t *testing.T) {
 		{"+4h", 4 * time.Hour},
 		{"+35MIN", 35 * time.Minute},
 		{"+10s", 10 * time.Second},
+		{"+1day", time.Hour * 24},
 	}
 
 	for _, test := range tests {

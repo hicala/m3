@@ -30,7 +30,6 @@ import (
 
 	"github.com/m3db/m3/src/query/block"
 	"github.com/m3db/m3/src/query/graphite/common"
-	"github.com/m3db/m3/src/query/graphite/errors"
 	"github.com/m3db/m3/src/query/graphite/ts"
 	xerrors "github.com/m3db/m3/src/x/errors"
 )
@@ -88,10 +87,46 @@ func minSeries(ctx *common.Context, series multiplePathSpecs) (ts.SeriesList, er
 	return combineSeries(ctx, series, wrapPathExpr(minSeriesFnName, ts.SeriesList(series)), ts.Min)
 }
 
+// powSeries takes a list of series and returns a new series containing the
+// pow value across the series at each datapoint
+// nolint: gocritic
+func powSeries(ctx *common.Context, series multiplePathSpecs) (ts.SeriesList, error) {
+	return combineSeries(ctx, series, wrapPathExpr(powSeriesFnName, ts.SeriesList(series)), ts.Pow)
+}
+
 // maxSeries takes a list of series and returns a new series containing the
 // maximum value across the series at each datapoint
 func maxSeries(ctx *common.Context, series multiplePathSpecs) (ts.SeriesList, error) {
 	return combineSeries(ctx, series, wrapPathExpr(maxSeriesFnName, ts.SeriesList(series)), ts.Max)
+}
+
+// medianSeries takes a list of series and returns a new series containing the
+// median value across the series at each datapoint
+func medianSeries(ctx *common.Context, series multiplePathSpecs) (ts.SeriesList, error) {
+	if len(series.Values) == 0 {
+		return ts.NewSeriesList(), nil
+	}
+	normalized, start, end, millisPerStep, err := common.Normalize(ctx, ts.SeriesList(series))
+	if err != nil {
+		return ts.NewSeriesList(), err
+	}
+	numSteps := ts.NumSteps(start, end, millisPerStep)
+	values := ts.NewValues(ctx, millisPerStep, numSteps)
+
+	valuesAtTime := make([]float64, len(normalized.Values))
+	for i := 0; i < numSteps; i++ {
+		for j, series := range normalized.Values {
+			valuesAtTime[j] = series.ValueAt(i)
+		}
+		values.SetValueAt(i, ts.Median(valuesAtTime, len(valuesAtTime)))
+	}
+
+	name := wrapPathExpr(medianSeriesFnName, ts.SeriesList(series))
+	output := ts.NewSeries(ctx, name, start, values)
+	return ts.SeriesList{
+		Values:   []*ts.Series{output},
+		Metadata: series.Metadata,
+	}, nil
 }
 
 // lastSeries takes a list of series and returns a new series containing the
@@ -197,7 +232,7 @@ func divideSeries(ctx *common.Context, dividendSeriesList, divisorSeriesList sin
 		return ts.NewSeriesList(), nil
 	}
 	if len(divisorSeriesList.Values) != 1 {
-		err := errors.NewInvalidParamsError(fmt.Errorf(
+		err := xerrors.NewInvalidParamsError(fmt.Errorf(
 			"divideSeries second argument must reference exactly one series but instead has %d",
 			len(divisorSeriesList.Values)))
 		return ts.NewSeriesList(), err
@@ -222,10 +257,23 @@ func divideSeries(ctx *common.Context, dividendSeriesList, divisorSeriesList sin
 // divideSeriesLists divides one series list by another series list
 func divideSeriesLists(ctx *common.Context, dividendSeriesList, divisorSeriesList singlePathSpec) (ts.SeriesList, error) {
 	if len(dividendSeriesList.Values) != len(divisorSeriesList.Values) {
-		err := errors.NewInvalidParamsError(fmt.Errorf(
+		err := xerrors.NewInvalidParamsError(fmt.Errorf(
 			"divideSeriesLists both SeriesLists must have exactly the same length"))
 		return ts.NewSeriesList(), err
 	}
+
+	// If either list is not sorted yet then apply a default sort for deterministic results.
+	if !dividendSeriesList.SortApplied {
+		// Use sort.Stable for deterministic output.
+		sort.Stable(ts.SeriesByName(dividendSeriesList.Values))
+		dividendSeriesList.SortApplied = true
+	}
+	if !divisorSeriesList.SortApplied {
+		// Use sort.Stable for deterministic output.
+		sort.Stable(ts.SeriesByName(divisorSeriesList.Values))
+		divisorSeriesList.SortApplied = true
+	}
+
 	results := make([]*ts.Series, len(dividendSeriesList.Values))
 	for idx, dividendSeries := range dividendSeriesList.Values {
 		divisorSeries := divisorSeriesList.Values[idx]
@@ -238,13 +286,15 @@ func divideSeriesLists(ctx *common.Context, dividendSeriesList, divisorSeriesLis
 	}
 
 	r := ts.SeriesList(dividendSeriesList)
+	// Set sorted as we sorted any input that wasn't already sorted.
+	r.SortApplied = true
 	r.Values = results
 	return r, nil
 }
 
 // aggregate takes a list of series and returns a new series containing the
 // value aggregated across the series at each datapoint using the specified function.
-// This function can be used with aggregation functionsL average (or avg), avg_zero,
+// This function can be used with aggregation functions average (or avg), avg_zero,
 // median, sum (or total), min, max, diff, stddev, count,
 // range (or rangeOf), multiply & last (or current).
 func aggregate(ctx *common.Context, series singlePathSpec, fname string) (ts.SeriesList, error) {
@@ -255,6 +305,8 @@ func aggregate(ctx *common.Context, series singlePathSpec, fname string) (ts.Ser
 		return minSeries(ctx, multiplePathSpecs(series))
 	case maxFnName, maxSeriesFnName:
 		return maxSeries(ctx, multiplePathSpecs(series))
+	case medianFnName, medianSeriesFnName:
+		return medianSeries(ctx, multiplePathSpecs(series))
 	case avgFnName, averageFnName, averageSeriesFnName:
 		return averageSeries(ctx, multiplePathSpecs(series))
 	case multiplyFnName, multiplySeriesFnName:
@@ -272,7 +324,7 @@ func aggregate(ctx *common.Context, series singlePathSpec, fname string) (ts.Ser
 	default:
 		// Median: the movingMedian() method already implemented is returning an series non compatible result. skip support for now.
 		// avg_zero is not implemented, skip support for now unless later identified actual use cases.
-		return ts.NewSeriesList(), errors.NewInvalidParamsError(fmt.Errorf("invalid func %s", fname))
+		return ts.NewSeriesList(), xerrors.NewInvalidParamsError(fmt.Errorf("invalid func %s", fname))
 	}
 }
 
@@ -298,23 +350,58 @@ func sumSeriesWithWildcards(
 	return combineSeriesWithWildcards(ctx, series, positions, sumSpecificationFunc, ts.Sum)
 }
 
+// multiplySeriesWithWildcards splits the given set of series into sub-groupings
+// based on wildcard matches in the hierarchy, then multiply the values in each
+// grouping
+func multiplySeriesWithWildcards(
+	ctx *common.Context,
+	series singlePathSpec,
+	positions ...int,
+) (ts.SeriesList, error) {
+	return combineSeriesWithWildcards(ctx, series, positions, multiplyWithWildcardsSpecificationFunc, ts.Mul)
+}
+
 // aggregateWithWildcards splits the given set of series into sub-groupings
 // based on wildcard matches in the hierarchy, then aggregate the values in
 // each grouping based on the given function.
+// Similar to combineSeriesWithWildcards function but more general, as it
+// supports any aggregate functions while combineSeriesWithWildcards only
+// support aggregation with existing ts.ConsolidationFunc.
 func aggregateWithWildcards(
 	ctx *common.Context,
 	series singlePathSpec,
 	fname string,
 	positions ...int,
 ) (ts.SeriesList, error) {
-	f, fexists := summarizeFuncs[fname]
-	if !fexists {
-		err := errors.NewInvalidParamsError(fmt.Errorf(
-			"invalid func %s", fname))
-		return ts.NewSeriesList(), err
+	if len(series.Values) == 0 {
+		return ts.SeriesList(series), nil
 	}
 
-	return combineSeriesWithWildcards(ctx, series, positions, f.specificationFunc, f.consolidationFunc)
+	toAggregate := splitSeriesIntoSubgroups(series, positions)
+
+	newSeries := make([]*ts.Series, 0, len(toAggregate))
+	for name, toAggregateSeries := range toAggregate {
+		seriesList := ts.SeriesList{
+			Values:   toAggregateSeries,
+			Metadata: series.Metadata,
+		}
+		aggregated, err := aggregate(ctx, singlePathSpec(seriesList), fname)
+		if err != nil {
+			return ts.NewSeriesList(), err
+		}
+		renamedSeries := aggregated.Values[0].RenamedTo(name)
+		newSeries = append(newSeries, renamedSeries)
+	}
+
+	r := ts.SeriesList(series)
+
+	r.Values = newSeries
+
+	// Ranging over hash map to create results destroys
+	// any sort order on the incoming series list
+	r.SortApplied = false
+
+	return r, nil
 }
 
 // combineSeriesWithWildcards splits the given set of series into sub-groupings
@@ -331,6 +418,34 @@ func combineSeriesWithWildcards(
 		return ts.SeriesList(series), nil
 	}
 
+	toCombine := splitSeriesIntoSubgroups(series, positions)
+
+	newSeries := make([]*ts.Series, 0, len(toCombine))
+	for name, toCombineSeries := range toCombine {
+		seriesList := ts.SeriesList{
+			Values:   toCombineSeries,
+			Metadata: series.Metadata,
+		}
+		combined, err := combineSeries(ctx, multiplePathSpecs(seriesList), name, f)
+		if err != nil {
+			return ts.NewSeriesList(), err
+		}
+		combined.Values[0].Specification = sf(seriesList)
+		newSeries = append(newSeries, combined.Values...)
+	}
+
+	r := ts.SeriesList(series)
+
+	r.Values = newSeries
+
+	// Ranging over hash map to create results destroys
+	// any sort order on the incoming series list
+	r.SortApplied = false
+
+	return r, nil
+}
+
+func splitSeriesIntoSubgroups(series singlePathSpec, positions []int) map[string][]*ts.Series {
 	var (
 		toCombine = make(map[string][]*ts.Series)
 		wildcards = make(map[int]struct{})
@@ -355,29 +470,7 @@ func combineSeriesWithWildcards(
 		toCombine[newName] = append(toCombine[newName], series)
 	}
 
-	newSeries := make([]*ts.Series, 0, len(toCombine))
-	for name, combinedSeries := range toCombine {
-		seriesList := ts.SeriesList{
-			Values:   combinedSeries,
-			Metadata: series.Metadata,
-		}
-		combined, err := combineSeries(ctx, multiplePathSpecs(seriesList), name, f)
-		if err != nil {
-			return ts.NewSeriesList(), err
-		}
-		combined.Values[0].Specification = sf(seriesList)
-		newSeries = append(newSeries, combined.Values...)
-	}
-
-	r := ts.SeriesList(series)
-
-	r.Values = newSeries
-
-	// Ranging over hash map to create results destroys
-	// any sort order on the incoming series list
-	r.SortApplied = false
-
-	return r, nil
+	return toCombine
 }
 
 // splits a slice into chunks
@@ -400,7 +493,10 @@ func chunkArrayHelper(slice []string, numChunks int) [][]string {
 }
 
 func evaluateTarget(ctx *common.Context, target string) (ts.SeriesList, error) {
-	eng := NewEngine(ctx.Engine.Storage())
+	eng, ok := ctx.Engine.(*Engine)
+	if !ok {
+		return ts.NewSeriesList(), fmt.Errorf("engine not native engine")
+	}
 	expression, err := eng.Compile(target)
 	if err != nil {
 		return ts.NewSeriesList(), err
@@ -424,7 +520,7 @@ given by nodeNum, then fill them into the template function provided (replacing 
 
 Additional Examples:
 
-Given keys of
+# Given keys of
 
 - `stats.counts.haproxy.web.2XX`
 - `stats.counts.haproxy.web.3XX`
@@ -480,7 +576,7 @@ func applyByNode(ctx *common.Context, seriesList singlePathSpec, nodeNum int, te
 		multiErr xerrors.MultiError
 
 		output         = make([]*ts.Series, 0, len(prefixes))
-		maxConcurrency = runtime.NumCPU() / 2
+		maxConcurrency = runtime.GOMAXPROCS(0) / 2
 	)
 	for _, prefixChunk := range chunkArrayHelper(prefixes, maxConcurrency) {
 		if multiErr.LastError() != nil {
@@ -488,12 +584,12 @@ func applyByNode(ctx *common.Context, seriesList singlePathSpec, nodeNum int, te
 		}
 
 		for _, prefix := range prefixChunk {
+			prefix := prefix // Capture for lambda.
 			newTarget := strings.ReplaceAll(templateFunction, "%", prefix)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				resultSeriesList, err := evaluateTarget(ctx, newTarget)
-
 				if err != nil {
 					mu.Lock()
 					multiErr = multiErr.Add(err)
@@ -515,106 +611,113 @@ func applyByNode(ctx *common.Context, seriesList singlePathSpec, nodeNum int, te
 		wg.Wait()
 	}
 
-	r := ts.NewSeriesList()
+	// Retain metadata but we definitely did not retain sort order.
+	r := ts.SeriesList(seriesList)
 	r.Values = output
+	r.SortApplied = false
 	return r, nil
 }
 
 // groupByNode takes a serieslist and maps a callback to subgroups within as defined by a common node
 //
-//    &target=groupByNode(foo.by-function.*.*.cpu.load5,2,"sumSeries")
+//	  &target=groupByNode(foo.by-function.*.*.cpu.load5,2,"sumSeries")
 //
-//  Would return multiple series which are each the result of applying the "sumSeries" function
-//  to groups joined on the second node (0 indexed) resulting in a list of targets like
+//	Would return multiple series which are each the result of applying the "sumSeries" function
+//	to groups joined on the second node (0 indexed) resulting in a list of targets like
 //
-//    sumSeries(foo.by-function.server1.*.cpu.load5),sumSeries(foo.by-function.server2.*.cpu.load5),...
+//	  sumSeries(foo.by-function.server1.*.cpu.load5),sumSeries(foo.by-function.server2.*.cpu.load5),...
 func groupByNode(ctx *common.Context, series singlePathSpec, node int, fname string) (ts.SeriesList, error) {
-	metaSeries := make(map[string][]*ts.Series)
-	for _, s := range series.Values {
-		parts := strings.Split(s.Name(), ".")
+	return groupByNodes(ctx, series, fname, []int{node}...)
+}
 
-		n := node
+func getAggregationKey(series *ts.Series, nodes []int) (string, error) {
+	seriesName := series.Name()
+	metricsPath, err := getFirstPathExpression(seriesName)
+	if err != nil {
+		return "", err
+	}
+	seriesName = metricsPath
+
+	parts := strings.Split(seriesName, ".")
+
+	keys := make([]string, 0, len(nodes))
+	for _, n := range nodes {
 		if n < 0 {
 			n = len(parts) + n
 		}
 
-		if n >= len(parts) || n < 0 {
-			return aggregate(ctx, series, fname)
+		if n < len(parts) {
+			keys = append(keys, parts[n])
+		} else {
+			keys = append(keys, "")
 		}
+	}
+	return strings.Join(keys, "."), nil
+}
 
-		key := parts[n]
-		metaSeries[key] = append(metaSeries[key], s)
+func getMetaSeriesGrouping(seriesList singlePathSpec, nodes []int) (map[string][]*ts.Series, error) {
+	metaSeries := make(map[string][]*ts.Series)
+
+	if len(nodes) > 0 {
+		for _, s := range seriesList.Values {
+			key, err := getAggregationKey(s, nodes)
+			if err != nil {
+				return metaSeries, err
+			}
+			metaSeries[key] = append(metaSeries[key], s)
+		}
 	}
 
-	return applyFnToMetaSeries(ctx, series, metaSeries, fname)
+	return metaSeries, nil
 }
 
 // Takes a serieslist and maps a callback to subgroups within as defined by multiple nodes
 //
-//      &target=groupByNodes(ganglia.server*.*.cpu.load*,"sum",1,4)
+//	&target=groupByNodes(ganglia.server*.*.cpu.load*,"sum",1,4)
 //
 // Would return multiple series which are each the result of applying the “sum” aggregation to groups joined on the
 // nodes’ list (0 indexed) resulting in a list of targets like
 //
-// 		sumSeries(ganglia.server1.*.cpu.load5),sumSeries(ganglia.server1.*.cpu.load10),sumSeries(ganglia.server1.*.cpu.load15),
-// 		sumSeries(ganglia.server2.*.cpu.load5),sumSeries(ganglia.server2.*.cpu.load10),sumSeries(ganglia.server2.*.cpu.load15),...
+//		sumSeries(ganglia.server1.*.cpu.load5),
+//		sumSeries(ganglia.server1.*.cpu.load10),
+//		sumSeries(ganglia.server1.*.cpu.load15),
+//
+//		sumSeries(ganglia.server2.*.cpu.load5),
+//		sumSeries(ganglia.server2.*.cpu.load10),
+//	    sumSeries(ganglia.server2.*.cpu.load15),...
 //
 // NOTE: if len(nodes) = 0, aggregate all series into 1 series.
-func groupByNodes(ctx *common.Context, series singlePathSpec, fname string, nodes ...int) (ts.SeriesList, error) {
-	metaSeries := make(map[string][]*ts.Series)
-
-	nodeLen := len(nodes)
-	if nodeLen == 0 {
-		key := "*" // put into single group, not ideal, but more graphite-ish.
-		for _, s := range series.Values {
-			metaSeries[key] = append(metaSeries[key], s)
-		}
-	} else {
-		for _, s := range series.Values {
-			parts := strings.Split(s.Name(), ".")
-
-			var keys []string
-			for _, n := range nodes {
-				if n < 0 {
-					n = len(parts) + n
-				}
-
-				if n >= len(parts) || n < 0 {
-					return aggregate(ctx, series, fname)
-				}
-
-				keys = append(keys, parts[n])
-			}
-			key := strings.Join(keys, ".")
-			metaSeries[key] = append(metaSeries[key], s)
-		}
+func groupByNodes(ctx *common.Context, seriesList singlePathSpec, fname string, nodes ...int) (ts.SeriesList, error) {
+	metaSeries, err := getMetaSeriesGrouping(seriesList, nodes)
+	if err != nil {
+		return ts.NewSeriesList(), err
 	}
 
-	return applyFnToMetaSeries(ctx, series, metaSeries, fname)
+	if len(metaSeries) == 0 {
+		// if nodes is an empty slice or every node in nodes exceeds the number
+		// of parts in each series, just treat it like aggregate
+		return aggregate(ctx, seriesList, fname)
+	}
+
+	return applyFnToMetaSeries(ctx, seriesList, metaSeries, fname)
 }
 
 func applyFnToMetaSeries(ctx *common.Context, series singlePathSpec, metaSeries map[string][]*ts.Series, fname string) (ts.SeriesList, error) {
-	if fname == "" {
-		fname = sumFnName
-	}
-
-	f, fexists := summarizeFuncs[fname]
-	if !fexists {
-		return ts.NewSeriesList(), errors.NewInvalidParamsError(fmt.Errorf("invalid func %s", fname))
-	}
-
 	newSeries := make([]*ts.Series, 0, len(metaSeries))
 	for key, metaSeries := range metaSeries {
 		seriesList := ts.SeriesList{
 			Values:   metaSeries,
 			Metadata: series.Metadata,
 		}
-		output, err := combineSeries(ctx, multiplePathSpecs(seriesList), key, f.consolidationFunc)
+		output, err := aggregate(ctx, singlePathSpec(seriesList), fname)
 		if err != nil {
 			return ts.NewSeriesList(), err
 		}
-		output.Values[0].Specification = f.specificationFunc(seriesList)
-		newSeries = append(newSeries, output.Values...)
+
+		if len(output.Values) > 0 {
+			series := output.Values[0].RenamedTo(key)
+			newSeries = append(newSeries, series)
+		}
 	}
 
 	r := ts.SeriesList(series)
@@ -642,7 +745,7 @@ func combineSeries(ctx *common.Context,
 
 	normalized, start, end, millisPerStep, err := common.Normalize(ctx, ts.SeriesList(series))
 	if err != nil {
-		err := errors.NewInvalidParamsError(fmt.Errorf("combine series error: %v", err))
+		err := xerrors.NewInvalidParamsError(fmt.Errorf("combine series error: %w", err))
 		return ts.NewSeriesList(), err
 	}
 
@@ -678,14 +781,14 @@ func weightedAverage(
 
 	for _, series := range input.Values {
 		if step != series.MillisPerStep() {
-			err := errors.NewInvalidParamsError(fmt.Errorf("different step sizes in input series not supported"))
+			err := xerrors.NewInvalidParamsError(fmt.Errorf("different step sizes in input series not supported"))
 			return ts.NewSeriesList(), err
 		}
 	}
 
 	for _, series := range weights.Values {
 		if step != series.MillisPerStep() {
-			err := errors.NewInvalidParamsError(fmt.Errorf("different step sizes in input series not supported"))
+			err := xerrors.NewInvalidParamsError(fmt.Errorf("different step sizes in input series not supported"))
 			return ts.NewSeriesList(), err
 		}
 	}

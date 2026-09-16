@@ -24,9 +24,9 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/m3db/m3/src/cluster/kv"
-
 	"github.com/golang/protobuf/proto"
+
+	"github.com/m3db/m3/src/cluster/kv"
 )
 
 // NewStore returns a new in-process store that can be used for testing
@@ -79,6 +79,12 @@ type store struct {
 	revision   int
 	values     map[string][]*value
 	watchables map[string]kv.ValueWatchable
+}
+
+// IsMem lets asserting if given store is an in memory one.
+func IsMem(s kv.Store) bool {
+	_, ok := s.(*store)
+	return ok
 }
 
 func (s *store) Get(key string) (kv.Value, error) {

@@ -27,6 +27,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fortytw2/leaktest"
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+	"github.com/uber-go/tally"
+
 	"github.com/m3db/m3/src/cluster/kv"
 	"github.com/m3db/m3/src/cluster/kv/mem"
 	"github.com/m3db/m3/src/cluster/placement"
@@ -39,10 +44,6 @@ import (
 	"github.com/m3db/m3/src/msg/protocol/proto"
 	"github.com/m3db/m3/src/msg/topic"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/fortytw2/leaktest"
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
 )
 
 func TestConsumerServiceWriterWithSharedConsumerWithNonShardedPlacement(t *testing.T) {
@@ -135,7 +136,7 @@ func TestConsumerServiceWriterWithSharedConsumerWithNonShardedPlacement(t *testi
 	}
 
 	for _, sw := range w.(*consumerServiceWriterImpl).shardWriters {
-		require.Equal(t, 3, len(sw.(*sharedShardWriter).mw.(*messageWriterImpl).consumerWriters))
+		require.Equal(t, 3, len(sw.(*sharedShardWriter).mw.consumerWriters))
 	}
 
 	p2 := placement.NewPlacement().
@@ -162,7 +163,7 @@ func TestConsumerServiceWriterWithSharedConsumerWithNonShardedPlacement(t *testi
 	}
 
 	for _, sw := range w.(*consumerServiceWriterImpl).shardWriters {
-		require.Equal(t, 2, len(sw.(*sharedShardWriter).mw.(*messageWriterImpl).consumerWriters))
+		require.Equal(t, 2, len(sw.(*sharedShardWriter).mw.consumerWriters))
 	}
 
 	csw.Close()
@@ -512,21 +513,45 @@ func TestConsumerServiceWriterFilter(t *testing.T) {
 	mm1 := producer.NewMockMessage(ctrl)
 	mm1.EXPECT().Shard().Return(uint32(1)).AnyTimes()
 	mm1.EXPECT().Size().Return(3).AnyTimes()
+	mm2 := producer.NewMockMessage(ctrl)
+	mm2.EXPECT().Shard().Return(uint32(0)).AnyTimes()
+	mm2.EXPECT().Size().Return(4).AnyTimes()
 
 	sw0.EXPECT().Write(gomock.Any())
 	csw.Write(producer.NewRefCountedMessage(mm0, nil))
 	sw1.EXPECT().Write(gomock.Any())
 	csw.Write(producer.NewRefCountedMessage(mm1, nil))
 
-	csw.RegisterFilter(func(m producer.Message) bool { return m.Shard() == uint32(0) })
+	csw.RegisterFilter(producer.NewFilterFunc(
+		func(m producer.Message) bool { return m.Shard() == uint32(0) },
+		producer.UnspecifiedFilter,
+		producer.StaticConfig))
+	// Write is not expected due to mm1 shard != 0
 	csw.Write(producer.NewRefCountedMessage(mm1, nil))
 
 	sw0.EXPECT().Write(gomock.Any())
+	// Write is expected due to mm0 shard == 0
 	csw.Write(producer.NewRefCountedMessage(mm0, nil))
 
-	csw.UnregisterFilter()
+	csw.RegisterFilter(producer.NewFilterFunc(
+		func(m producer.Message) bool { return m.Size() == 3 },
+		producer.UnspecifiedFilter,
+		producer.StaticConfig))
+	sw0.EXPECT().Write(gomock.Any())
+	// Write is expected because to mm0 shard == 0 and mm0 size == 3
+	csw.Write(producer.NewRefCountedMessage(mm0, nil))
+
+	// Write is not expected because to mm2 size != 3
+	csw.Write(producer.NewRefCountedMessage(mm2, nil))
+
+	// All messages are expected to write after unregistering filters
+	csw.UnregisterFilters()
+	sw0.EXPECT().Write(gomock.Any())
+	csw.Write(producer.NewRefCountedMessage(mm0, nil))
 	sw1.EXPECT().Write(gomock.Any())
 	csw.Write(producer.NewRefCountedMessage(mm1, nil))
+	sw0.EXPECT().Write(gomock.Any())
+	csw.Write(producer.NewRefCountedMessage(mm2, nil))
 }
 
 func TestConsumerServiceWriterAllowInitValueErrorWithCreateWatchError(t *testing.T) {
@@ -608,7 +633,8 @@ func TestConsumerServiceWriterUpdateNonShardedPlacementWithReplicatedConsumption
 	cs := topic.NewConsumerService().SetServiceID(sid).SetConsumptionType(topic.Replicated)
 	sd := services.NewMockServices(ctrl)
 	pOpts := placement.NewOptions().SetIsSharded(false)
-	ps := service.NewPlacementService(storage.NewPlacementStorage(mem.NewStore(), sid.String(), pOpts), pOpts)
+	ps := service.NewPlacementService(storage.NewPlacementStorage(mem.NewStore(), sid.String(), pOpts),
+		service.WithPlacementOptions(pOpts))
 	sd.EXPECT().PlacementService(sid, gomock.Any()).Return(ps, nil)
 	_, err := ps.BuildInitialPlacement([]placement.Instance{
 		placement.NewInstance().SetID("i1").SetEndpoint("i1").SetWeight(1),
@@ -667,6 +693,56 @@ func TestConsumerServiceCloseShardWritersConcurrently(t *testing.T) {
 	}
 }
 
+func TestConsumerServiceWriterMetrics(t *testing.T) {
+	testScope := tally.NewTestScope("test", nil)
+
+	acceptedMetadata := producer.NewFilterFuncMetadata(
+		producer.ShardSetFilter,
+		producer.DynamicConfig)
+
+	notAcceptedMetadata := producer.NewFilterFuncMetadata(
+		producer.PercentageFilter,
+		producer.DynamicConfig)
+
+	m := newConsumerServiceWriterMetrics(testScope)
+	m.getFilterAcceptedGranularCounter(acceptedMetadata).Inc(1)
+	m.getFilterNotAcceptedGranularCounter(notAcceptedMetadata).Inc(1)
+
+	accepetKey := m.getGranularFilterCounterMapKey(acceptedMetadata)
+	notAcceptKey := m.getGranularFilterCounterMapKey(notAcceptedMetadata)
+
+	_, ok := m.filterAcceptedGranular.Load(accepetKey)
+	require.True(t, ok)
+
+	_, ok = m.filterNotAcceptedGranular.Load(notAcceptKey)
+	require.True(t, ok)
+
+	gotAcceptedValue := false
+	gotNotAcceptedValue := false
+
+	snap := testScope.Snapshot()
+	for _, c := range snap.Counters() {
+		if c.Name() == "test.filter-accepted-granular" {
+			require.Equal(t, "DynamicConfig", c.Tags()["config-source"])
+			require.Equal(t, "ShardSetFilter", c.Tags()["filter-type"])
+			require.Equal(t, int64(1), c.Value())
+			gotAcceptedValue = true
+		}
+
+		if c.Name() == "test.filter-not-accepted-granular" {
+			require.Equal(t, "DynamicConfig", c.Tags()["config-source"])
+			require.Equal(t, "PercentageFilter", c.Tags()["filter-type"])
+			require.Equal(t, int64(1), c.Value())
+			gotNotAcceptedValue = true
+		}
+	}
+
+	require.True(t, gotAcceptedValue)
+	require.True(t, gotNotAcceptedValue)
+}
+
 func testPlacementService(store kv.Store, sid services.ServiceID) placement.Service {
-	return service.NewPlacementService(storage.NewPlacementStorage(store, sid.String(), placement.NewOptions()), placement.NewOptions())
+	return service.NewPlacementService(
+		storage.NewPlacementStorage(store, sid.String(), placement.NewOptions()),
+	)
 }

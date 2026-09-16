@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2020 Uber Technologies, Inc.
@@ -27,6 +28,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/cluster/services"
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/integration/fake"
@@ -34,8 +37,6 @@ import (
 	"github.com/m3db/m3/src/dbnode/retention"
 	"github.com/m3db/m3/src/dbnode/topology"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestCommitLogBootstrapUnownedShard(t *testing.T) {
@@ -89,12 +90,18 @@ func TestCommitLogBootstrapUnownedShard(t *testing.T) {
 	opts := NewTestOptions(t).
 		SetNamespaces([]namespace.Metadata{ns1}).
 		SetNumShards(numShards)
-	setupOpts := []bootstrappableTestSetupOptions{
-		{disablePeersBootstrapper: true, topologyInitializer: topoInit},
-		{disablePeersBootstrapper: true, topologyInitializer: topoInit},
+	setupOpts := []BootstrappableTestSetupOptions{
+		{
+			DisablePeersBootstrapper: true,
+			TopologyInitializer:      topoInit,
+		},
+		{
+			DisablePeersBootstrapper: true,
+			TopologyInitializer:      topoInit,
+		},
 	}
 
-	setups, closeFn := newDefaultBootstrappableTestSetups(t, opts, setupOpts)
+	setups, closeFn := NewDefaultBootstrappableTestSetups(t, opts, setupOpts)
 	defer closeFn()
 
 	// Only set this up for the first setup because we're only writing commit

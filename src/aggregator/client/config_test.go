@@ -24,6 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+	yaml "gopkg.in/yaml.v2"
+
 	"github.com/m3db/m3/src/aggregator/sharding"
 	m3clusterclient "github.com/m3db/m3/src/cluster/client"
 	"github.com/m3db/m3/src/cluster/kv"
@@ -32,14 +36,9 @@ import (
 	"github.com/m3db/m3/src/x/instrument"
 	xio "github.com/m3db/m3/src/x/io"
 	"github.com/m3db/m3/src/x/pool"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
-	yaml "gopkg.in/yaml.v2"
 )
 
-var (
-	testClientConfig = `
+var testClientConfig = `
 placementKV:
   zone: testZone
   environment: testEnvironment
@@ -62,15 +61,16 @@ encoder:
     watermark:
       low: 0.001
       high: 0.01
-flushSize: 1440
+flushWorkerCount: 10
+forceFlushEvery: 123s
 maxBatchSize: 42
 maxTimerBatchSize: 140
-batchFlushDeadline: 123ms
 queueSize: 1000
 queueDropType: oldest
 connection:
   connectionTimeout: 1s
   connectionKeepAlive: true
+  readTimeout: 1s
   writeTimeout: 1s
   initReconnectThreshold: 2
   maxReconnectThreshold: 5000
@@ -81,8 +81,14 @@ connection:
     maxBackoff: 1s
     maxRetries: 2
     jitter: true
+  tls:
+    enabled: true
+    insecureSkipVerify: true
+    serverName: TestServer
+    caFile: /tmp/ca
+    certFile: /tmp/cert
+    keyFile: /tmp/key
 `
-)
 
 func TestConfigUnmarshal(t *testing.T) {
 	var cfg Configuration
@@ -91,8 +97,8 @@ func TestConfigUnmarshal(t *testing.T) {
 	require.Equal(t, "testZone", cfg.PlacementKV.Zone)
 	require.Equal(t, "testEnvironment", cfg.PlacementKV.Environment)
 	require.Equal(t, "testNamespace", cfg.PlacementKV.Namespace)
-	require.Equal(t, "testWatchKey", cfg.PlacementWatcher.Key)
-	require.Equal(t, 15*time.Second, cfg.PlacementWatcher.InitWatchTimeout)
+	require.Equal(t, "testWatchKey", cfg.Watcher.Key)
+	require.Equal(t, 15*time.Second, cfg.Watcher.InitWatchTimeout)
 	require.Equal(t, sharding.Murmur32Hash, *cfg.HashType)
 	require.Equal(t, 10*time.Minute, *cfg.ShardCutoverWarmupDuration)
 	require.Equal(t, time.Minute, *cfg.ShardCutoffLingerDuration)
@@ -104,14 +110,15 @@ func TestConfigUnmarshal(t *testing.T) {
 	}, cfg.Encoder.BytesPool.Buckets)
 	require.Equal(t, 0.001, cfg.Encoder.BytesPool.Watermark.RefillLowWatermark)
 	require.Equal(t, 0.01, cfg.Encoder.BytesPool.Watermark.RefillHighWatermark)
-	require.Equal(t, 1440, cfg.FlushSize)
+	require.Equal(t, 10, cfg.FlushWorkerCount)
+	require.Equal(t, 123*time.Second, cfg.ForceFlushEvery)
 	require.Equal(t, 140, cfg.MaxTimerBatchSize)
 	require.Equal(t, 42, cfg.MaxBatchSize)
-	require.Equal(t, 123*time.Millisecond, cfg.BatchFlushDeadline)
 	require.Equal(t, 1000, cfg.QueueSize)
 	require.Equal(t, DropOldest, *cfg.QueueDropType)
 	require.Equal(t, time.Second, cfg.Connection.ConnectionTimeout)
 	require.Equal(t, true, *cfg.Connection.ConnectionKeepAlive)
+	require.Equal(t, time.Second, cfg.Connection.ReadTimeout)
 	require.Equal(t, time.Second, cfg.Connection.WriteTimeout)
 	require.Equal(t, 2, cfg.Connection.InitReconnectThreshold)
 	require.Equal(t, 5000, cfg.Connection.MaxReconnectThreshold)
@@ -122,6 +129,12 @@ func TestConfigUnmarshal(t *testing.T) {
 	require.Equal(t, time.Second, cfg.Connection.WriteRetries.MaxBackoff)
 	require.Equal(t, 2, cfg.Connection.WriteRetries.MaxRetries)
 	require.Equal(t, true, *cfg.Connection.WriteRetries.Jitter)
+	require.True(t, cfg.Connection.TLS.Enabled)
+	require.True(t, cfg.Connection.TLS.InsecureSkipVerify)
+	require.Equal(t, "TestServer", cfg.Connection.TLS.ServerName)
+	require.Equal(t, "/tmp/ca", cfg.Connection.TLS.CAFile)
+	require.Equal(t, "/tmp/cert", cfg.Connection.TLS.CertFile)
+	require.Equal(t, "/tmp/key", cfg.Connection.TLS.KeyFile)
 	require.Nil(t, cfg.Connection.WriteRetries.Forever)
 }
 
@@ -142,7 +155,7 @@ func TestNewClientOptions(t *testing.T) {
 	clockOpts := clock.NewOptions()
 	instrumentOpts := instrument.NewOptions()
 	rwOpts := xio.NewOptions()
-	opts, err := cfg.newClientOptions(kvClient, clockOpts, instrumentOpts, rwOpts)
+	opts, err := cfg.NewClientOptions(kvClient, clockOpts, instrumentOpts, rwOpts)
 	require.NoError(t, err)
 
 	// Verify the constructed options match expectations.
@@ -151,14 +164,14 @@ func TestNewClientOptions(t *testing.T) {
 	require.Equal(t, 50000000, opts.EncoderOptions().MaxMessageSize())
 	require.NotNil(t, opts.EncoderOptions().BytesPool())
 	require.NotNil(t, opts.ShardFn())
-	require.Equal(t, "testWatchKey", opts.StagedPlacementWatcherOptions().StagedPlacementKey())
-	require.True(t, store == opts.StagedPlacementWatcherOptions().StagedPlacementStore())
+	require.Equal(t, "testWatchKey", opts.WatcherOptions().StagedPlacementKey())
+	require.True(t, store == opts.WatcherOptions().StagedPlacementStore())
 	require.Equal(t, 10*time.Minute, opts.ShardCutoverWarmupDuration())
 	require.Equal(t, time.Minute, opts.ShardCutoffLingerDuration())
-	require.Equal(t, 1440, opts.FlushSize())
+	require.Equal(t, 10, opts.FlushWorkerCount())
+	require.Equal(t, 123*time.Second, opts.ForceFlushEvery())
 	require.Equal(t, 140, opts.MaxTimerBatchSize())
 	require.Equal(t, 42, opts.MaxBatchSize())
-	require.Equal(t, 123*time.Millisecond, opts.BatchFlushDeadline())
 	require.Equal(t, DropOldest, opts.QueueDropType())
 	require.Equal(t, time.Second, opts.ConnectionOptions().ConnectionTimeout())
 	require.Equal(t, true, opts.ConnectionOptions().ConnectionKeepAlive())
@@ -173,4 +186,10 @@ func TestNewClientOptions(t *testing.T) {
 	require.Equal(t, 2, opts.ConnectionOptions().WriteRetryOptions().MaxRetries())
 	require.Equal(t, true, opts.ConnectionOptions().WriteRetryOptions().Jitter())
 	require.Equal(t, false, opts.ConnectionOptions().WriteRetryOptions().Forever())
+	require.True(t, opts.ConnectionOptions().TLSOptions().ClientEnabled())
+	require.True(t, opts.ConnectionOptions().TLSOptions().InsecureSkipVerify())
+	require.Equal(t, "TestServer", opts.ConnectionOptions().TLSOptions().ServerName())
+	require.Equal(t, "/tmp/ca", opts.ConnectionOptions().TLSOptions().CAFile())
+	require.Equal(t, "/tmp/cert", opts.ConnectionOptions().TLSOptions().CertFile())
+	require.Equal(t, "/tmp/key", opts.ConnectionOptions().TLSOptions().KeyFile())
 }

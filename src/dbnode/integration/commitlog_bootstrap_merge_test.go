@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2017 Uber Technologies, Inc.
@@ -26,17 +27,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/retention"
-	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 // Consider a database running with a single namespaces, and the following retention opts:
 //
-//           | BlockSize | Retention Period
+//	| BlockSize | Retention Period
+//
 // ns1       |    2h     |      8h
 // commitLog |   15m     |      8h
 //
@@ -44,8 +45,9 @@ import (
 //
 // time (flowing left --> right):
 // time-label: t0  t1  t2  t3
-//  ns1        .   .          [blocksize . is 2h]
-//  commitlog      ,,,,,,,,,  [blocksize , is 30min]
+//
+//	ns1        .   .          [blocksize . is 2h]
+//	commitlog      ,,,,,,,,,  [blocksize , is 30min]
 //
 // The test creates the blocks below, and verifies the bootstrappers are able to merge the data
 // successfully.
@@ -96,19 +98,16 @@ func TestCommitLogAndFSMergeBootstrap(t *testing.T) {
 	log.Info("generated data")
 
 	log.Info("writing filesets")
-	t0Nano := xtime.ToUnixNano(t0)
-	t1Nano := xtime.ToUnixNano(t1)
 	fsSeriesMaps := generate.SeriesBlocksByStart{
-		t0Nano: seriesMaps[t0Nano],
-		t1Nano: seriesMaps[t1Nano],
+		t0: seriesMaps[t0],
+		t1: seriesMaps[t1],
 	}
-	require.NoError(t, writeTestDataToDisk(ns1, setup, fsSeriesMaps, 0))
+	require.NoError(t, writeTestDataToDiskWithIndex(ns1, setup, fsSeriesMaps))
 
 	log.Info("writing commit logs")
-	t2Nano := xtime.ToUnixNano(t2)
 	commitlogSeriesMaps := generate.SeriesBlocksByStart{
-		t1Nano: seriesMaps[t1Nano],
-		t2Nano: seriesMaps[t2Nano],
+		t1: seriesMaps[t1],
+		t2: seriesMaps[t2],
 	}
 	writeCommitLogData(t, setup, commitLogOpts, commitlogSeriesMaps, ns1, false)
 

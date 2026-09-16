@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2017 Uber Technologies, Inc.
@@ -27,6 +28,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/persist/fs/commitlog"
@@ -34,8 +37,6 @@ import (
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/ident"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -78,7 +79,9 @@ func randStringRunes(n int) string {
 	return string(b)
 }
 
-func generateSeriesMaps(numBlocks int, updateConfig generate.UpdateBlockConfig, starts ...time.Time) generate.SeriesBlocksByStart {
+func generateSeriesMaps(
+	numBlocks int, updateConfig generate.UpdateBlockConfig, starts ...xtime.UnixNano,
+) generate.SeriesBlocksByStart {
 	blockConfig := []generate.BlockConfig{}
 	for i := 0; i < numBlocks; i++ {
 		name := []string{}
@@ -116,7 +119,7 @@ func writeCommitLogDataSpecifiedTS(
 	opts commitlog.Options,
 	data generate.SeriesBlocksByStart,
 	namespace namespace.Metadata,
-	ts time.Time,
+	ts xtime.UnixNano,
 	genSnapshots bool,
 ) int {
 	return writeCommitLogDataBase(t, s, opts, data, namespace, &ts, nil)
@@ -140,7 +143,7 @@ func writeCommitLogDataBase(
 	opts commitlog.Options,
 	data generate.SeriesBlocksByStart,
 	namespace namespace.Metadata,
-	specifiedTS *time.Time,
+	specifiedTS *xtime.UnixNano,
 	pred generate.WriteDatapointPredicate,
 ) int {
 	if pred == nil {
@@ -156,7 +159,7 @@ func writeCommitLogDataBase(
 		shardSet       = s.ShardSet()
 		tagEncoderPool = opts.FilesystemOptions().TagEncoderPool()
 		tagSliceIter   = ident.NewTagsIterator(ident.Tags{})
-		writes int
+		writes         int
 	)
 
 	// Write out commit log data.
@@ -164,9 +167,9 @@ func writeCommitLogDataBase(
 		if specifiedTS != nil {
 			s.SetNowFn(*specifiedTS)
 		} else {
-			s.SetNowFn(currTs.ToTime())
+			s.SetNowFn(currTs)
 		}
-		ctx := context.NewContext()
+		ctx := context.NewBackground()
 		defer ctx.Close()
 
 		m := map[xtime.UnixNano]generate.SeriesBlock{

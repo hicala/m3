@@ -23,14 +23,14 @@ package migrator
 import (
 	"testing"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/persist/fs"
 	"github.com/m3db/m3/src/dbnode/persist/fs/migration"
 	"github.com/m3db/m3/src/dbnode/storage"
 	"github.com/m3db/m3/src/dbnode/storage/bootstrap"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
 )
 
 func TestOptionsValidateStorageOptions(t *testing.T) {
@@ -43,7 +43,7 @@ func TestOptionsValidateStorageOptions(t *testing.T) {
 	opts = opts.SetStorageOptions(nil)
 	require.Error(t, opts.Validate())
 
-	opts = opts.SetStorageOptions(storage.NewOptions())
+	opts = opts.SetStorageOptions(storage.DefaultTestOptions())
 	require.Error(t, opts.Validate())
 }
 

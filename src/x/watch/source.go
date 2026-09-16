@@ -24,9 +24,9 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/m3db/m3/src/x/close"
-
 	"go.uber.org/zap"
+
+	xresource "github.com/m3db/m3/src/x/resource"
 )
 
 // ErrSourceClosed indicates that the Source should be closed.
@@ -41,7 +41,7 @@ type SourceInput interface {
 
 // Source polls data by calling SourcePollFn and notifies its watches on updates.
 type Source interface {
-	close.SimpleCloser
+	xresource.SimpleCloser
 
 	// Get returns the latest value.
 	Get() interface{}

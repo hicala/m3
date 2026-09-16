@@ -25,13 +25,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/m3db/m3/src/dbnode/clock"
-	"github.com/m3db/m3/src/dbnode/persist/fs"
-	"github.com/m3db/m3/src/dbnode/persist/fs/commitlog"
-	"github.com/m3db/m3/src/x/instrument"
-
 	"github.com/uber-go/tally"
 	"go.uber.org/zap"
+
+	"github.com/m3db/m3/src/dbnode/persist/fs"
+	"github.com/m3db/m3/src/dbnode/persist/fs/commitlog"
+	"github.com/m3db/m3/src/x/clock"
+	"github.com/m3db/m3/src/x/instrument"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 type (
@@ -85,6 +86,7 @@ type mediator struct {
 	mediatorTimeBarrier mediatorTimeBarrier
 	closedCh            chan struct{}
 	tickInterval        time.Duration
+	fileOpsProcesses    []FileOpsProcess
 	backgroundProcesses []BackgroundProcess
 }
 
@@ -97,19 +99,22 @@ func newMediator(database database, commitlog commitlog.CommitLog, opts Options)
 		nowFn = opts.ClockOptions().NowFn()
 	)
 	d := &mediator{
-		database:            database,
-		opts:                opts,
-		nowFn:               opts.ClockOptions().NowFn(),
-		sleepFn:             time.Sleep,
-		metrics:             newMediatorMetrics(scope),
-		state:               mediatorNotOpen,
-		mediatorTimeBarrier: newMediatorTimeBarrier(nowFn, iOpts),
-		closedCh:            make(chan struct{}),
-		tickInterval:        opts.MediatorTickInterval(),
+		database:     database,
+		opts:         opts,
+		nowFn:        opts.ClockOptions().NowFn(),
+		sleepFn:      time.Sleep,
+		metrics:      newMediatorMetrics(scope),
+		state:        mediatorNotOpen,
+		closedCh:     make(chan struct{}),
+		tickInterval: opts.MediatorTickInterval(),
 	}
-
 	fsm := newFileSystemManager(database, commitlog, opts)
 	d.databaseFileSystemManager = fsm
+	d.fileOpsProcesses = []FileOpsProcess{
+		FileOpsProcessFn(d.ongoingFileSystemProcesses),
+		FileOpsProcessFn(d.ongoingColdFlushProcesses),
+	}
+	d.mediatorTimeBarrier = newMediatorTimeBarrier(nowFn, iOpts, len(d.fileOpsProcesses))
 
 	// NB(bodu): Cold flush needs its own persist manager now
 	// that its running in its own thread.
@@ -147,8 +152,9 @@ func (m *mediator) Open() error {
 	m.state = mediatorOpen
 
 	go m.reportLoop()
-	go m.ongoingFileSystemProcesses()
-	go m.ongoingColdFlushProcesses()
+	for _, fileOpsProcess := range m.fileOpsProcesses {
+		go fileOpsProcess.Start()
+	}
 	go m.ongoingTick()
 
 	for _, process := range m.backgroundProcesses {
@@ -159,17 +165,17 @@ func (m *mediator) Open() error {
 }
 
 func (m *mediator) DisableFileOpsAndWait() {
-	status := m.databaseFileSystemManager.Disable()
-	for status == fileOpInProgress {
-		m.sleepFn(fileOpCheckInterval)
-		status = m.databaseFileSystemManager.Status()
-	}
+	fsStatus := m.databaseFileSystemManager.Disable()
 	// Even though the cold flush runs separately, its still
 	// considered a fs process.
-	status = m.databaseColdFlushManager.Disable()
-	for status == fileOpInProgress {
+	cfStatus := m.databaseColdFlushManager.Disable()
+	for fsStatus == fileOpInProgress {
 		m.sleepFn(fileOpCheckInterval)
-		status = m.databaseColdFlushManager.Status()
+		fsStatus = m.databaseFileSystemManager.Status()
+	}
+	for cfStatus == fileOpInProgress {
+		m.sleepFn(fileOpCheckInterval)
+		cfStatus = m.databaseColdFlushManager.Status()
 	}
 }
 
@@ -212,8 +218,8 @@ func (m *mediator) Close() error {
 // The mediator mediates the relationship between ticks and warm flushes/snapshots.
 //
 // For example, the requirements to perform a flush are:
-// 		1) currentTime > blockStart.Add(blockSize).Add(bufferPast)
-// 		2) node is not bootstrapping (technically shard is not bootstrapping)
+//  1. currentTime > blockStart.Add(blockSize).Add(bufferPast)
+//  2. node is not bootstrapping (technically shard is not bootstrapping)
 //
 // Similarly, there is logic in the Tick flow for removing shard flush states from a map so that it doesn't
 // grow infinitely for nodes that are not restarted. If the Tick path measured the current time when it made that
@@ -232,7 +238,7 @@ func (m *mediator) ongoingFileSystemProcesses() {
 			m.sleepFn(m.tickInterval)
 
 			// Check if the mediator is already closed.
-			if !m.isOpen() {
+			if !m.IsOpen() {
 				return
 			}
 
@@ -253,7 +259,7 @@ func (m *mediator) ongoingColdFlushProcesses() {
 			m.sleepFn(m.tickInterval)
 
 			// Check if the mediator is already closed.
-			if !m.isOpen() {
+			if !m.IsOpen() {
 				return
 			}
 
@@ -275,7 +281,7 @@ func (m *mediator) ongoingTick() {
 			m.sleepFn(m.tickInterval)
 
 			// Check if the mediator is already closed.
-			if !m.isOpen() {
+			if !m.IsOpen() {
 				return
 			}
 
@@ -298,25 +304,13 @@ func (m *mediator) ongoingTick() {
 
 func (m *mediator) runFileSystemProcesses() {
 	// See comment over mediatorTimeBarrier for an explanation of this logic.
-	log := m.opts.InstrumentOptions().Logger()
-	mediatorTime, err := m.mediatorTimeBarrier.fsProcessesWait()
-	if err != nil {
-		log.Error("error within ongoingFileSystemProcesses waiting for next mediatorTime", zap.Error(err))
-		return
-	}
-
-	m.databaseFileSystemManager.Run(mediatorTime, syncRun, noForce)
+	mediatorTime := m.mediatorTimeBarrier.fsProcessesWait()
+	m.databaseFileSystemManager.Run(mediatorTime)
 }
 
 func (m *mediator) runColdFlushProcesses() {
 	// See comment over mediatorTimeBarrier for an explanation of this logic.
-	log := m.opts.InstrumentOptions().Logger()
-	mediatorTime, err := m.mediatorTimeBarrier.fsProcessesWait()
-	if err != nil {
-		log.Error("error within ongoingColdFlushProcesses waiting for next mediatorTime", zap.Error(err))
-		return
-	}
-
+	mediatorTime := m.mediatorTimeBarrier.fsProcessesWait()
 	m.databaseColdFlushManager.Run(mediatorTime)
 }
 
@@ -335,7 +329,7 @@ func (m *mediator) reportLoop() {
 	}
 }
 
-func (m *mediator) isOpen() bool {
+func (m *mediator) IsOpen() bool {
 	m.RLock()
 	defer m.RUnlock()
 	return m.state == mediatorOpen
@@ -363,7 +357,8 @@ func (m *mediator) isOpen() bool {
 // with a consistent view of time as the tick it is on. They don't necessarily need to start on the same tick. See the
 // diagram below for an example case.
 //
-//  ____________       ___________          _________________
+//	____________       ___________          _________________
+//
 // | Flush (t0) |     | Tick (t0) |        | Cold Flush (t0) |
 // |            |     |           |        |                 |
 // |            |     |___________|        |                 |
@@ -373,11 +368,13 @@ func (m *mediator) isOpen() bool {
 // |            |     |___________|        |                 |
 // |            |      ___________         |                 |
 // |____________|     | Tick (t0) |        |                 |
-//  barrier.wait()    |           |        |                 |
-//                    |___________|        |                 |
-//                    mediatorTime = t1    |                 |
-//                    barrier.release()    |                 |
-//  ____________       ___________         |                 |
+//
+//	barrier.wait()    |           |        |                 |
+//	                  |___________|        |                 |
+//	                  mediatorTime = t1    |                 |
+//	                  barrier.release()    |                 |
+//	____________       ___________         |                 |
+//
 // | Flush (t1) |     | Tick (t1) |        |_________________|
 // |            |     |           |         barrier.wait()
 // |            |     |___________|
@@ -386,49 +383,52 @@ func (m *mediator) isOpen() bool {
 // |            |       ___________         _________________
 // |            |      | Tick (t2) |       | Cold Flush (t2) |
 // |____________|      |           |       |                 |
-//  barrier.wait()     |___________|       |                 |
-//                     mediatorTime = t3   |                 |
-//                     barrier.release()   |                 |
-//   ____________       ___________        |                 |
-//  | Flush (t3) |     | Tick (t3) |       |                 |
-//  |            |     |           |       |                 |
-//  |            |     |___________|       |                 |
-//  |            |      ___________        |                 |
-//  |            |     | Tick (t3) |       |                 |
-//  |            |     |           |       |                 |
-//  |            |     |___________|       |                 |
-//  |            |      ___________        |                 |
-//  |____________|     | Tick (t3) |       |_________________|
-//   barrier.wait()    |           |        barrier.wait()
-//                     |___________|
-//                     mediatorTime = t4
-//                     barrier.release()
-//   ____________       ___________         _________________
-//  | Flush (t4) |     | Tick (t4) |       | Cold Flush (t4) |
-//  |            |     |           |       |                 |
+//
+//	barrier.wait()     |___________|       |                 |
+//	                   mediatorTime = t3   |                 |
+//	                   barrier.release()   |                 |
+//	 ____________       ___________        |                 |
+//	| Flush (t3) |     | Tick (t3) |       |                 |
+//	|            |     |           |       |                 |
+//	|            |     |___________|       |                 |
+//	|            |      ___________        |                 |
+//	|            |     | Tick (t3) |       |                 |
+//	|            |     |           |       |                 |
+//	|            |     |___________|       |                 |
+//	|            |      ___________        |                 |
+//	|____________|     | Tick (t3) |       |_________________|
+//	 barrier.wait()    |           |        barrier.wait()
+//	                   |___________|
+//	                   mediatorTime = t4
+//	                   barrier.release()
+//	 ____________       ___________         _________________
+//	| Flush (t4) |     | Tick (t4) |       | Cold Flush (t4) |
+//	|            |     |           |       |                 |
+//
 // ------------------------------------------------------------
 type mediatorTimeBarrier struct {
 	sync.Mutex
 	// Both mediatorTime and numFsProcessesWaiting are protected
 	// by the mutex.
-	mediatorTime          time.Time
+	mediatorTime          xtime.UnixNano
 	numFsProcessesWaiting int
+	numMaxWaiters         int
 
 	nowFn     func() time.Time
 	iOpts     instrument.Options
-	releaseCh chan time.Time
+	releaseCh chan xtime.UnixNano
 }
 
 // initialMediatorTime should only be used to obtain the initial time for
 // the ongoing tick loop. All subsequent updates should come from the
 // release method.
-func (b *mediatorTimeBarrier) initialMediatorTime() time.Time {
+func (b *mediatorTimeBarrier) initialMediatorTime() xtime.UnixNano {
 	b.Lock()
 	defer b.Unlock()
 	return b.mediatorTime
 }
 
-func (b *mediatorTimeBarrier) fsProcessesWait() (time.Time, error) {
+func (b *mediatorTimeBarrier) fsProcessesWait() xtime.UnixNano {
 	b.Lock()
 	b.numFsProcessesWaiting++
 	b.Unlock()
@@ -438,10 +438,10 @@ func (b *mediatorTimeBarrier) fsProcessesWait() (time.Time, error) {
 	b.Lock()
 	b.numFsProcessesWaiting--
 	b.Unlock()
-	return t, nil
+	return t
 }
 
-func (b *mediatorTimeBarrier) maybeRelease() (time.Time, error) {
+func (b *mediatorTimeBarrier) maybeRelease() (xtime.UnixNano, error) {
 	b.Lock()
 	numWaiters := b.numFsProcessesWaiting
 	mediatorTime := b.mediatorTime
@@ -457,28 +457,31 @@ func (b *mediatorTimeBarrier) maybeRelease() (time.Time, error) {
 
 	// If the filesystem processes are waiting then update the time and allow
 	// both the filesystem processes and the tick to proceed with the new time.
-	newMediatorTime := b.nowFn()
+	newMediatorTime := xtime.ToUnixNano(b.nowFn())
 	if newMediatorTime.Before(b.mediatorTime) {
 		instrument.EmitAndLogInvariantViolation(b.iOpts, func(l *zap.Logger) {
 			l.Error(
 				"mediator time attempted to move backwards in time",
-				zap.Time("prevTime", b.mediatorTime), zap.Time("newTime", newMediatorTime))
+				zap.Time("prevTime", b.mediatorTime.ToTime()),
+				zap.Time("newTime", newMediatorTime.ToTime()))
 		})
-		return time.Time{}, errMediatorTimeTriedToProgressBackwards
+		return 0, errMediatorTimeTriedToProgressBackwards
 	}
 
 	b.mediatorTime = newMediatorTime
 	for i := 0; i < numWaiters; i++ {
 		b.releaseCh <- b.mediatorTime
 	}
+
 	return b.mediatorTime, nil
 }
 
-func newMediatorTimeBarrier(nowFn func() time.Time, iOpts instrument.Options) mediatorTimeBarrier {
+func newMediatorTimeBarrier(nowFn func() time.Time, iOpts instrument.Options, maxWaiters int) mediatorTimeBarrier {
 	return mediatorTimeBarrier{
-		mediatorTime: nowFn(),
-		nowFn:        nowFn,
-		iOpts:        iOpts,
-		releaseCh:    make(chan time.Time, 0),
+		mediatorTime:  xtime.ToUnixNano(nowFn()),
+		nowFn:         nowFn,
+		iOpts:         iOpts,
+		numMaxWaiters: maxWaiters,
+		releaseCh:     make(chan xtime.UnixNano),
 	}
 }

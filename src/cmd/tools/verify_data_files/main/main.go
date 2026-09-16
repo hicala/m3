@@ -30,6 +30,10 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	"github.com/pborman/getopt"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+
 	"github.com/m3db/m3/src/cmd/tools"
 	"github.com/m3db/m3/src/dbnode/digest"
 	"github.com/m3db/m3/src/dbnode/persist"
@@ -38,14 +42,7 @@ import (
 	"github.com/m3db/m3/src/x/checked"
 	"github.com/m3db/m3/src/x/ident"
 	"github.com/m3db/m3/src/x/pool"
-
-	"github.com/pborman/getopt"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
-
-const snapshotType = "snapshot"
-const flushType = "flush"
 
 func main() {
 	var (
@@ -165,6 +162,10 @@ func run(opts runOptions) {
 
 	log.Info("verifying file sets", zap.Int("numFileSets", len(fileSetFiles)))
 	for _, fileSet := range fileSetFiles {
+		if !fileSet.HasCompleteCheckpointFile() {
+			continue // Don't validate file sets without checkpoint file.
+		}
+
 		log.Info("verifying file set file", zap.Any("fileSet", fileSet))
 		if err := verifyFileSet(verifyFileSetOptions{
 			filePathPrefix:      filePathPrefix,
@@ -301,10 +302,16 @@ func readEntry(
 	data checked.Bytes,
 	checksum uint32,
 ) (readEntryResult, error) {
-	if !utf8.Valid(id.Bytes()) {
+	idValue := id.Bytes()
+	if len(idValue) == 0 {
 		return readEntryResult{invalidID: true},
 			fmt.Errorf("invalid id: err=%s, as_string=%s, as_hex=%x",
-				"non-utf8", id.Bytes(), id.Bytes())
+				"empty", idValue, idValue)
+	}
+	if !utf8.Valid(idValue) {
+		return readEntryResult{invalidID: true},
+			fmt.Errorf("invalid id: err=%s, as_string=%s, as_hex=%x",
+				"non-utf8", idValue, idValue)
 	}
 
 	for tags.Next() {

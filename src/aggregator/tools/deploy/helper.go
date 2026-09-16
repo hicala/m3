@@ -27,12 +27,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/cluster/placement"
 	xerrors "github.com/m3db/m3/src/x/errors"
 	"github.com/m3db/m3/src/x/retry"
 	xsync "github.com/m3db/m3/src/x/sync"
-
-	"go.uber.org/zap"
 )
 
 var (
@@ -59,7 +59,7 @@ type Helper interface {
 type helper struct {
 	logger                  *zap.Logger
 	planner                 planner
-	client                  aggregatorClient
+	client                  AggregatorClient
 	mgr                     Manager
 	retrier                 retry.Retrier
 	foreverRetrier          retry.Retrier
@@ -71,7 +71,7 @@ type helper struct {
 
 // NewHelper creates a new deployment helper.
 func NewHelper(opts HelperOptions) (Helper, error) {
-	client := newAggregatorClient(opts.HTTPClient())
+	client := NewAggregatorClient(opts.HTTPClient())
 	planner := newPlanner(client, opts.PlannerOptions())
 	retryOpts := opts.RetryOptions()
 	retrier := retry.NewRetrier(retryOpts)

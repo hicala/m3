@@ -26,22 +26,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/m3db/m3/src/query/api/v1/handler"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/query/api/v1/options"
+	"github.com/m3db/m3/src/query/api/v1/route"
 	"github.com/m3db/m3/src/query/executor"
 	"github.com/m3db/m3/src/query/models"
 	"github.com/m3db/m3/src/query/parser"
 	"github.com/m3db/m3/src/query/parser/promql"
 	"github.com/m3db/m3/src/x/instrument"
 	xhttp "github.com/m3db/m3/src/x/net/http"
-
-	"go.uber.org/zap"
 )
 
 const (
 	// PromParseURL is the url for native prom parse handler, this parses out the
 	// query and returns a JSON representation of the execution DAG.
-	PromParseURL = handler.RoutePrefixV1 + "/parse"
+	PromParseURL = route.Prefix + "/parse"
 
 	// PromParseHTTPMethod is the HTTP method used with this resource.
 	PromParseHTTPMethod = http.MethodGet
@@ -155,7 +155,7 @@ func parseRootNode(
 	engine executor.Engine,
 	logger *zap.Logger,
 ) (FunctionNode, error) {
-	query, err := parseQuery(r)
+	query, err := ParseQuery(r)
 	if err != nil {
 		logger.Error("cannot parse query string", zap.Error(err))
 		return FunctionNode{}, err
@@ -194,7 +194,7 @@ func (h *promParseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logger := h.instrumentOpts.Logger()
 	root, err := parseRootNode(r, h.engine, logger)
 	if err != nil {
-		xhttp.Error(w, err, http.StatusBadRequest)
+		xhttp.WriteError(w, xhttp.NewError(err, http.StatusBadRequest))
 		return
 	}
 

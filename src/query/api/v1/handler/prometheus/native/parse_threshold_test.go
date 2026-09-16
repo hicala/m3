@@ -22,18 +22,19 @@ package native
 
 import (
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 
+	pql "github.com/prometheus/prometheus/promql/parser"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/query/api/v1/options"
 	"github.com/m3db/m3/src/query/executor"
 	"github.com/m3db/m3/src/x/instrument"
 	xtest "github.com/m3db/m3/src/x/test"
-	pql "github.com/prometheus/prometheus/promql/parser"
-
-	"github.com/stretchr/testify/require"
 )
 
 var thresholdTests = []struct {
@@ -185,24 +186,31 @@ func TestParseThreshold(t *testing.T) {
 	)
 
 	engine := executor.NewEngine(opts)
-	for i, tt := range thresholdTests {
-		handlerOpts := options.EmptyHandlerOptions().SetEngine(engine)
-		h := NewPromThresholdHandler(handlerOpts)
-		query := fmt.Sprintf("/threshold?query=%s", url.QueryEscape(tt.query))
-
-		req := httptest.NewRequest("GET", query, nil)
-		w := httptest.NewRecorder()
-
-		h.ServeHTTP(w, req)
-		body := w.Result().Body
-		defer body.Close()
-
-		r, err := ioutil.ReadAll(body)
-		require.NoError(t, err)
-
-		ex := xtest.MustPrettyJSONString(t, tt.ex)
-		actual := xtest.MustPrettyJSONString(t, string(r))
-		require.Equal(t, ex, actual,
-			fmt.Sprintf("Run %d:\n%s", i, xtest.Diff(ex, actual)))
+	for _, tt := range thresholdTests {
+		t.Run(tt.query, func(t *testing.T) {
+			testParseThreshold(t, engine, tt.query, tt.ex)
+		})
 	}
+}
+
+func testParseThreshold(t *testing.T, engine executor.Engine, query string, expected string) {
+	handlerOpts := options.EmptyHandlerOptions().SetEngine(engine)
+	h := NewPromThresholdHandler(handlerOpts)
+	query = fmt.Sprintf("/threshold?query=%s", url.QueryEscape(query))
+
+	req := httptest.NewRequest("GET", query, nil)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+	body := w.Result().Body
+	defer func(body io.ReadCloser) {
+		require.NoError(t, body.Close())
+	}(body)
+
+	r, err := ioutil.ReadAll(body)
+	require.NoError(t, err)
+
+	ex := xtest.MustPrettyJSONString(t, expected)
+	actual := xtest.MustPrettyJSONString(t, string(r))
+	require.Equal(t, ex, actual, xtest.Diff(ex, actual))
 }

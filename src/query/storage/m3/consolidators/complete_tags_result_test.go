@@ -23,15 +23,15 @@ package consolidators
 import (
 	"testing"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/client"
 	"github.com/m3db/m3/src/query/block"
 	"github.com/m3db/m3/src/query/models"
 	"github.com/m3db/m3/src/x/ident"
 	xtest "github.com/m3db/m3/src/x/test"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestExhaustiveTagMerge(t *testing.T) {
@@ -92,12 +92,13 @@ func TestMultiFetchTagsResult(t *testing.T) {
 	it := res.Tags[0].Iter
 
 	// NB: assert tags are still iteratable.
-	ex := []tag{tag{name: "foo", value: "bar"}}
+	ex := []tag{{name: "foo", value: "bar"}}
 	for i := 0; it.Next(); i++ {
 		tag := it.Current()
 		assert.Equal(t, ex[i].name, tag.Name.String())
 		assert.Equal(t, ex[i].value, tag.Value.String())
 	}
 
+	require.Equal(t, 1, res.Metadata.FetchedSeriesCount)
 	require.NoError(t, it.Err())
 }

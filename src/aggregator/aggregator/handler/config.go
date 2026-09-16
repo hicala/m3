@@ -24,19 +24,22 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/uber-go/tally"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/aggregator/aggregator/handler/filter"
 	"github.com/m3db/m3/src/aggregator/aggregator/handler/writer"
 	"github.com/m3db/m3/src/aggregator/sharding"
 	"github.com/m3db/m3/src/cluster/client"
+	"github.com/m3db/m3/src/cluster/kv"
 	"github.com/m3db/m3/src/cluster/services"
 	"github.com/m3db/m3/src/metrics/policy"
 	"github.com/m3db/m3/src/msg/producer"
 	"github.com/m3db/m3/src/msg/producer/config"
+	"github.com/m3db/m3/src/msg/routing"
 	"github.com/m3db/m3/src/x/instrument"
 	xio "github.com/m3db/m3/src/x/io"
 	"github.com/m3db/m3/src/x/pool"
-
-	"go.uber.org/zap"
 )
 
 var (
@@ -45,13 +48,13 @@ var (
 	errBothDynamicAndStaticBackendConfiguration = errors.New("both dynamic and static backend were configured")
 )
 
-// FlushHandlerConfiguration configures flush handlers.
-type FlushHandlerConfiguration struct {
-	Handlers []flushHandlerConfiguration `yaml:"handlers" validate:"nonzero"`
+// FlushConfiguration configures flush handlers.
+type FlushConfiguration struct {
+	Handlers []FlushHandlerConfiguration `yaml:"handlers" validate:"nonzero"`
 }
 
 // NewHandler creates a new flush handler based on the configuration.
-func (c FlushHandlerConfiguration) NewHandler(
+func (c FlushConfiguration) NewHandler(
 	cs client.Client,
 	instrumentOpts instrument.Options,
 	rwOpts xio.Options,
@@ -59,9 +62,7 @@ func (c FlushHandlerConfiguration) NewHandler(
 	if len(c.Handlers) == 0 {
 		return nil, errNoHandlerConfiguration
 	}
-	var (
-		handlers = make([]Handler, 0, len(c.Handlers))
-	)
+	handlers := make([]Handler, 0, len(c.Handlers))
 	for _, hc := range c.Handlers {
 		handler, err := hc.newHandler(cs, instrumentOpts, rwOpts)
 		if err != nil {
@@ -101,15 +102,16 @@ func (c writerConfiguration) NewWriterOptions(
 	return opts
 }
 
-type flushHandlerConfiguration struct {
+// FlushHandlerConfiguration contains configuration for individual flush handlers.
+type FlushHandlerConfiguration struct {
 	// StaticBackend configures the backend.
-	StaticBackend *staticBackendConfiguration `yaml:"staticBackend"`
+	StaticBackend *StaticBackendConfiguration `yaml:"staticBackend"`
 
 	// DynamicBackend configures the dynamic backend.
-	DynamicBackend *dynamicBackendConfiguration `yaml:"dynamicBackend"`
+	DynamicBackend *DynamicBackendConfiguration `yaml:"dynamicBackend"`
 }
 
-func (c flushHandlerConfiguration) newHandler(
+func (c FlushHandlerConfiguration) newHandler(
 	cs client.Client,
 	instrumentOpts instrument.Options,
 	rwOpts xio.Options,
@@ -134,7 +136,8 @@ func (c flushHandlerConfiguration) newHandler(
 	}
 }
 
-func (c flushHandlerConfiguration) Validate() error {
+// Validate validates the FlushHandlerConfiguration.
+func (c FlushHandlerConfiguration) Validate() error {
 	if c.StaticBackend == nil && c.DynamicBackend == nil {
 		return errNoDynamicOrStaticBackendConfiguration
 	}
@@ -144,7 +147,8 @@ func (c flushHandlerConfiguration) Validate() error {
 	return nil
 }
 
-type dynamicBackendConfiguration struct {
+// DynamicBackendConfiguration configures a dynamic backend as a flush handler.
+type DynamicBackendConfiguration struct {
 	// Name of the backend.
 	Name string `yaml:"name"`
 
@@ -154,35 +158,60 @@ type dynamicBackendConfiguration struct {
 	// Producer configs the m3msg producer.
 	Producer config.ProducerConfiguration `yaml:"producer"`
 
-	// Filters configs the filter for consumer services.
-	Filters []consumerServiceFilterConfiguration `yaml:"filters"`
+	// ShardSetFilters configs the shard set filter for consumer services.
+	ShardSetFilters []ConsumerServiceFilterConfiguration `yaml:"filters"`
 
-	// Filters configs the filter for consumer services.
+	// StoragePolicyFilters configs the storage policy filter for consumer services.
 	StoragePolicyFilters []storagePolicyFilterConfiguration `yaml:"storagePolicyFilters"`
+
+	// PercentageFilters configs the percentage filter for consumer services.
+	PercentageFilters []percentageFilterConfiguration `yaml:"percentageFilters"`
+
+	// RoutingPolicyFilters configs the routing policy filter for consumer services.
+	RoutingPolicyFilters []routingPolicyFilterConfiguration `yaml:"routingPolicyFilters"`
+
+	// RoutingPolicyConfig configs the routing policy options for the topic.
+	RoutingPolicyConfig routingPolicyConfiguration `yaml:"routingPolicyConfig"`
 
 	// Writer configs the writer options.
 	Writer writerConfiguration `yaml:"writer"`
 }
 
-func (c *dynamicBackendConfiguration) newProtobufHandler(
+func (c *DynamicBackendConfiguration) newProtobufHandler(
 	cs client.Client,
 	instrumentOpts instrument.Options,
 	rwOpts xio.Options,
 ) (Handler, error) {
+	logger := instrumentOpts.Logger()
+
 	scope := instrumentOpts.MetricsScope().Tagged(map[string]string{
 		"backend":   c.Name,
 		"component": "producer",
 	})
 	instrumentOpts = instrumentOpts.SetMetricsScope(scope)
+
+	rph, err := c.RoutingPolicyConfig.NewRoutingPolicyHandler(cs, logger)
+	if err != nil {
+		return nil, err
+	}
+
 	p, err := c.Producer.NewProducer(cs, instrumentOpts, rwOpts)
 	if err != nil {
 		return nil, err
 	}
+
+	p.SetRoutingPolicyHandler(rph)
+	logger.Info(
+		"registered routing policy handler",
+		zap.Any("routingPolicyConfig", c.RoutingPolicyConfig),
+		zap.Bool("handlerIsNotNil", rph != nil),
+	)
+
 	if err := p.Init(); err != nil {
 		return nil, err
 	}
-	logger := instrumentOpts.Logger()
-	for _, filter := range c.Filters {
+
+	for _, filter := range c.ShardSetFilters {
 		sid, f := filter.NewConsumerServiceFilter()
 		p.RegisterFilter(sid, f)
 		logger.Info("registered filter for consumer service", zap.Stringer("service", sid))
@@ -192,6 +221,25 @@ func (c *dynamicBackendConfiguration) newProtobufHandler(
 		p.RegisterFilter(sid, f)
 		logger.Info("registered storage policy filter for consumer service",
 			zap.Any("policies", filter.StoragePolicies),
+			zap.Stringer("service", sid))
+	}
+	for _, filter := range c.PercentageFilters {
+		sid, f := filter.NewConsumerServiceFilter()
+		p.RegisterFilter(sid, f)
+		logger.Info("registered percentage filter for consumer service",
+			zap.Any("percentage", filter.Percentage),
+			zap.Stringer("service", sid))
+	}
+	for _, filter := range c.RoutingPolicyFilters {
+		if rph == nil {
+			logger.Info("routing policy handler is not enabled, skipping routing policy filter registration")
+			continue
+		}
+		sid, f := filter.NewConsumerServiceFilter(logger, scope, rph)
+		p.RegisterFilter(sid, f)
+		logger.Info("registered routing policy filter for consumer service",
+			zap.Any("isDefault", filter.IsDefault),
+			zap.Any("allowedTrafficTypes", filter.AllowedTrafficTypes),
 			zap.Stringer("service", sid))
 	}
 	wOpts := c.Writer.NewWriterOptions(instrumentOpts)
@@ -205,19 +253,89 @@ type storagePolicyFilterConfiguration struct {
 }
 
 func (c storagePolicyFilterConfiguration) NewConsumerServiceFilter() (services.ServiceID, producer.FilterFunc) {
-	return c.ServiceID.NewServiceID(), writer.NewStoragePolicyFilter(c.StoragePolicies)
+	return c.ServiceID.NewServiceID(), writer.NewStoragePolicyFilter(c.StoragePolicies, producer.StaticConfig)
 }
 
-type consumerServiceFilterConfiguration struct {
+type percentageFilterConfiguration struct {
+	ServiceID  services.ServiceIDConfiguration `yaml:"serviceID" validate:"nonzero"`
+	Percentage float64                         `yaml:"percentage" validate:"min=0.0,max=1.0"`
+}
+
+func (c percentageFilterConfiguration) NewConsumerServiceFilter() (services.ServiceID, producer.FilterFunc) {
+	return c.ServiceID.NewServiceID(), filter.NewPercentageFilter(c.Percentage, producer.StaticConfig)
+}
+
+type routingPolicyFilterConfiguration struct {
+	ServiceID           services.ServiceIDConfiguration `yaml:"serviceID" validate:"nonzero"`
+	IsDefault           bool                            `yaml:"isDefault"`
+	AllowedTrafficTypes []string                        `yaml:"allowedTrafficTypes" validate:"nonzero"`
+}
+
+func (c routingPolicyFilterConfiguration) NewConsumerServiceFilter(
+	logger *zap.Logger,
+	scope tally.Scope,
+	rph routing.PolicyHandler,
+) (services.ServiceID, producer.FilterFunc) {
+	serviceID := c.ServiceID.NewServiceID()
+	serviceScope := scope.Tagged(map[string]string{
+		"consumer-service-name": serviceID.Name(),
+		"consumer-service-zone": serviceID.Zone(),
+		"consumer-service-env":  serviceID.Environment(),
+	})
+	p := writer.RoutingPolicyFilterParams{
+		Scope:                serviceScope,
+		Logger:               logger,
+		RoutingPolicyHandler: rph,
+		IsDefault:            c.IsDefault,
+		AllowedTrafficTypes:  c.AllowedTrafficTypes,
+	}
+	return serviceID, writer.NewRoutingPolicyFilter(p, producer.StaticConfig)
+}
+
+// ConsumerServiceFilterConfiguration - exported to be able to write unit tests
+type ConsumerServiceFilterConfiguration struct {
 	ServiceID services.ServiceIDConfiguration `yaml:"serviceID" validate:"nonzero"`
 	ShardSet  sharding.ShardSet               `yaml:"shardSet" validate:"nonzero"`
 }
 
-func (c consumerServiceFilterConfiguration) NewConsumerServiceFilter() (services.ServiceID, producer.FilterFunc) {
-	return c.ServiceID.NewServiceID(), filter.NewShardSetFilter(c.ShardSet)
+// NewConsumerServiceFilter - exported to be able to write unit tests
+func (c ConsumerServiceFilterConfiguration) NewConsumerServiceFilter() (services.ServiceID, producer.FilterFunc) {
+	return c.ServiceID.NewServiceID(), filter.NewShardSetFilter(c.ShardSet, producer.StaticConfig)
 }
 
-type staticBackendConfiguration struct {
+// routingPolicyConfiguration configures a routing policy that is configured via kv(etcd)
+type routingPolicyConfiguration struct {
+	KvConfig kv.OverrideConfiguration `yaml:"kvConfig"`
+	KVKey    string                   `yaml:"kvKey"`
+}
+
+func (c routingPolicyConfiguration) NewRoutingPolicyHandler(
+	kvClient client.Client,
+	logger *zap.Logger,
+) (routing.PolicyHandler, error) {
+	if c.KVKey == "" {
+		logger.Info("kvKey is not set, skipping routing policy handler registration")
+		return nil, nil
+	}
+
+	opts := routing.NewPolicyHandlerOptions()
+
+	kvOverrideOpts, err := c.KvConfig.NewOverrideOptions()
+	if err != nil {
+		return nil, err
+	}
+
+	opts = opts.WithKVOverrideOptions(kvOverrideOpts)
+	opts = opts.WithKVKey(c.KVKey)
+	opts = opts.WithKVClient(kvClient)
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
+	return routing.NewRoutingPolicyHandler(opts)
+}
+
+// StaticBackendConfiguration configures a static backend as a flush handler.
+type StaticBackendConfiguration struct {
 	// Static backend type.
 	Type Type `yaml:"type"`
 

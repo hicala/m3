@@ -29,11 +29,11 @@ import (
 	"os"
 	"time"
 
+	"gopkg.in/vmihailenco/msgpack.v2"
+
 	"github.com/m3db/m3/src/dbnode/digest"
 	xmsgpack "github.com/m3db/m3/src/dbnode/persist/fs/msgpack"
-	"github.com/m3db/m3/src/dbnode/persist/fs/wide"
 	"github.com/m3db/m3/src/dbnode/persist/schema"
-	"github.com/m3db/m3/src/dbnode/x/xio"
 	"github.com/m3db/m3/src/x/checked"
 	xerrors "github.com/m3db/m3/src/x/errors"
 	"github.com/m3db/m3/src/x/ident"
@@ -41,8 +41,6 @@ import (
 	"github.com/m3db/m3/src/x/mmap"
 	"github.com/m3db/m3/src/x/pool"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"gopkg.in/vmihailenco/msgpack.v2"
 )
 
 var (
@@ -51,6 +49,9 @@ var (
 
 	// errSeekChecksumMismatch returned when data checksum does not match the expected checksum
 	errSeekChecksumMismatch = errors.New("checksum does not match expected checksum")
+
+	// errSeekNotCompleted returned when no error but seek did not complete.
+	errSeekNotCompleted = errors.New("seek not completed")
 
 	// errClonesShouldNotBeOpened returned when Open() is called on a clone
 	errClonesShouldNotBeOpened = errors.New("clone should not be opened")
@@ -148,7 +149,7 @@ func (s *seeker) ConcurrentIDBloomFilter() *ManagedConcurrentBloomFilter {
 func (s *seeker) Open(
 	namespace ident.ID,
 	shard uint32,
-	blockStart time.Time,
+	blockStart xtime.UnixNano,
 	volumeIndex int,
 	resources ReusableSeekerResources,
 ) error {
@@ -164,7 +165,7 @@ func (s *seeker) Open(
 	)
 
 	if volumeIndex == 0 {
-		isLegacy, err = isFirstVolumeLegacy(shardDir, blockStart, checkpointFileSuffix)
+		isLegacy, err = isFirstVolumeLegacy(shardDir, blockStart, CheckpointFileSuffix)
 		if err != nil {
 			return err
 		}
@@ -172,10 +173,10 @@ func (s *seeker) Open(
 
 	// Open necessary files
 	if err := openFiles(os.Open, map[string]**os.File{
-		dataFilesetPathFromTimeAndIndex(shardDir, blockStart, volumeIndex, infoFileSuffix, isLegacy):        &infoFd,
+		dataFilesetPathFromTimeAndIndex(shardDir, blockStart, volumeIndex, InfoFileSuffix, isLegacy):        &infoFd,
 		dataFilesetPathFromTimeAndIndex(shardDir, blockStart, volumeIndex, indexFileSuffix, isLegacy):       &s.indexFd,
 		dataFilesetPathFromTimeAndIndex(shardDir, blockStart, volumeIndex, dataFileSuffix, isLegacy):        &s.dataFd,
-		dataFilesetPathFromTimeAndIndex(shardDir, blockStart, volumeIndex, digestFileSuffix, isLegacy):      &digestFd,
+		dataFilesetPathFromTimeAndIndex(shardDir, blockStart, volumeIndex, DigestFileSuffix, isLegacy):      &digestFd,
 		dataFilesetPathFromTimeAndIndex(shardDir, blockStart, volumeIndex, bloomFilterFileSuffix, isLegacy): &bloomFilterFd,
 		dataFilesetPathFromTimeAndIndex(shardDir, blockStart, volumeIndex, summariesFileSuffix, isLegacy):   &summariesFd,
 	}); err != nil {
@@ -374,97 +375,16 @@ func (s *seeker) SeekByIndexEntry(
 	return buffer, nil
 }
 
-func (s *seeker) SeekReadMismatchesByIndexChecksum(
-	checksum xio.IndexChecksum,
-	mismatchChecker wide.EntryChecksumMismatchChecker,
-	resources ReusableSeekerResources,
-) (wide.ReadMismatch, error) {
-	completed := false
-	defer func() {
-		// NB: if this fails to complete, finalize the checksum.
-		if !completed {
-			checksum.Finalize()
-		}
-	}()
-
-	mismatchChecker.Lock()
-	// NB: first, apply the reader.
-	allMismatches, err := mismatchChecker.ComputeMismatchesForEntry(checksum)
-	if err != nil {
-		// NB: free checksum resources
-		return wide.ReadMismatch{}, err
-	}
-
-	// NB: only filter out reader side mismatches. TODO: remove index checksum
-	// mismatches, since they are not necessary in the updated model.
-	mismatches := allMismatches[:0]
-	for _, m := range allMismatches {
-		if m.IsReaderMismatch() {
-			mismatches = append(mismatches, m)
-		}
-	}
-
-	if len(mismatches) == 0 {
-		// This entry matches; no need to retrieve data.
-		return wide.ReadMismatch{}, nil
-	}
-
-	if len(mismatches) > 1 {
-		return wide.ReadMismatch{}, fmt.Errorf("multiple reader mismatches")
-	}
-
-	mismatchChecker.Unlock()
-	resources.offsetFileReader.reset(s.dataFd, checksum.Offset)
-
-	// Obtain an appropriately sized buffer.
-	var buffer checked.Bytes
-	if s.opts.bytesPool != nil {
-		buffer = s.opts.bytesPool.Get(int(checksum.Size))
-		buffer.IncRef()
-		defer buffer.DecRef()
-		buffer.Resize(int(checksum.Size))
-	} else {
-		buffer = checked.NewBytes(make([]byte, checksum.Size), nil)
-		buffer.IncRef()
-		defer buffer.DecRef()
-	}
-
-	// Copy the actual data into the underlying buffer.
-	underlyingBuf := buffer.Bytes()
-	n, err := io.ReadFull(resources.offsetFileReader, underlyingBuf)
-	if err != nil {
-		return wide.ReadMismatch{}, err
-	}
-	if n != int(checksum.Size) {
-		// This check is redundant because io.ReadFull will return an error if
-		// its not able to read the specified number of bytes, but we keep it
-		// in for posterity.
-		return wide.ReadMismatch{}, fmt.Errorf("tried to read: %d bytes but read: %d", checksum.Size, n)
-	}
-
-	// NB(r): _must_ check the checksum against known checksum as the data
-	// file might not have been verified if we haven't read through the file yet.
-	if checksum.DataChecksum != int64(digest.Checksum(underlyingBuf)) {
-		return wide.ReadMismatch{}, errSeekChecksumMismatch
-	}
-
-	completed = true
-	return wide.ReadMismatch{
-		IndexChecksum: checksum,
-		Data:          buffer,
-	}, nil
-}
-
 // SeekIndexEntry performs the following steps:
 //
-//     1. Go to the indexLookup and it will give us an offset that is a good starting
-//        point for scanning the index file.
-//     2. Reset an offsetFileReader with the index fd and an offset (so that calls to Read() will
-//        begin at the offset provided by the offset lookup).
-//     3. Reset a decoder with fileDecoderStream (offsetFileReader wrapped in a bufio.Reader).
-//     4. Call DecodeIndexEntry in a tight loop (which will advance our position in the
-//        offsetFileReader internally) until we've either found the entry we're looking for or gone so
-//        far we know it does not exist.
+//  1. Go to the indexLookup and it will give us an offset that is a good starting
+//     point for scanning the index file.
+//  2. Reset an offsetFileReader with the index fd and an offset (so that calls to Read() will
+//     begin at the offset provided by the offset lookup).
+//  3. Reset a decoder with fileDecoderStream (offsetFileReader wrapped in a bufio.Reader).
+//  4. Call DecodeIndexEntry in a tight loop (which will advance our position in the
+//     offsetFileReader internally) until we've either found the entry we're looking for or gone so
+//     far we know it does not exist.
 func (s *seeker) SeekIndexEntry(
 	id ident.ID,
 	resources ReusableSeekerResources,
@@ -544,96 +464,8 @@ func (s *seeker) SeekIndexEntry(
 	}
 }
 
-// SeekIndexEntryToIndexChecksum performs the following steps:
-//
-//     1. Go to the indexLookup and it will give us an offset that is a good starting
-//        point for scanning the index file.
-//     2. Reset an offsetFileReader with the index fd and an offset (so that calls to Read() will
-//        begin at the offset provided by the offset lookup).
-//     3. Reset a decoder with fileDecoderStream (offsetFileReader wrapped in a bufio.Reader).
-//     4. Call DecodeIndexEntry in a tight loop (which will advance our position in the
-//        offsetFileReader internally) until we've either found the entry we're looking for or gone so
-//        far we know it does not exist.
-func (s *seeker) SeekIndexEntryToIndexChecksum(
-	id ident.ID,
-	resources ReusableSeekerResources,
-) (xio.IndexChecksum, error) {
-	offset, err := s.indexLookup.getNearestIndexFileOffset(id, resources)
-	// Should never happen, either something is really wrong with the code or
-	// the file on disk was corrupted.
-	if err != nil {
-		return xio.IndexChecksum{}, err
-	}
-
-	resources.offsetFileReader.reset(s.indexFd, offset)
-	resources.fileDecoderStream.Reset(resources.offsetFileReader)
-	resources.xmsgpackDecoder.Reset(resources.fileDecoderStream)
-
-	idBytes := id.Bytes()
-	for {
-		checksum, status, err := resources.xmsgpackDecoder.
-			DecodeIndexEntryToIndexChecksum(idBytes, resources.decodeIndexEntryBytesPool)
-		if err != nil {
-			// No longer being used so we can return to the pool.
-			resources.decodeIndexEntryBytesPool.Put(checksum.ID)
-			resources.decodeIndexEntryBytesPool.Put(checksum.EncodedTags)
-
-			if err == io.EOF {
-				// Reached the end of the file without finding the ID.
-				return xio.IndexChecksum{}, errSeekIDNotFound
-			}
-			// Should never happen, either something is really wrong with the code or
-			// the file on disk was corrupted.
-			return xio.IndexChecksum{}, instrument.InvariantErrorf(err.Error())
-		}
-
-		if status != xmsgpack.MatchedLookupStatus {
-			// No longer being used so we can return to the pool.
-			resources.decodeIndexEntryBytesPool.Put(checksum.ID)
-			resources.decodeIndexEntryBytesPool.Put(checksum.EncodedTags)
-
-			if status == xmsgpack.NotFoundLookupStatus {
-				// a `NotFound` status for the index checksum decode indicates that the
-				// current seek has passed the point in the file where this ID could have
-				// appeared; short-circuit here as the ID does not exist in the file.
-				return xio.IndexChecksum{}, errSeekIDNotFound
-			} else if status == xmsgpack.MismatchLookupStatus {
-				// a `Mismatch` status for the index checksum decode indicates that the
-				// current seek does not match the ID, but that it may still appear in
-				// the file.
-				continue
-			} else if status == xmsgpack.ErrorLookupStatus {
-				return xio.IndexChecksum{}, errors.New("unknown index lookup error")
-			}
-		}
-
-		// If it's a match, we need to copy the tags into a checked bytes
-		// so they can be passed along. We use the "real" bytes pool here
-		// because we're passing ownership of the bytes to the entry / caller.
-		var checkedEncodedTags checked.Bytes
-		if tags := checksum.EncodedTags; len(tags) > 0 {
-			checkedEncodedTags = s.opts.bytesPool.Get(len(tags))
-			checkedEncodedTags.IncRef()
-			checkedEncodedTags.AppendAll(tags)
-		}
-
-		// No longer being used so we can return to the pool.
-		resources.decodeIndexEntryBytesPool.Put(checksum.ID)
-		resources.decodeIndexEntryBytesPool.Put(checksum.EncodedTags)
-
-		return xio.IndexChecksum{
-			ID:               id,
-			Size:             checksum.Size,
-			Offset:           checksum.Offset,
-			DataChecksum:     checksum.DataChecksum,
-			EncodedTags:      checkedEncodedTags,
-			MetadataChecksum: checksum.MetadataChecksum,
-		}, nil
-	}
-}
-
 func (s *seeker) Range() xtime.Range {
-	return xtime.Range{Start: s.start.ToTime(), End: s.start.ToTime().Add(s.blockSize)}
+	return xtime.Range{Start: s.start, End: s.start.Add(s.blockSize)}
 }
 
 func (s *seeker) Close() error {

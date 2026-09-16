@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2016 Uber Technologies, Inc.
@@ -24,7 +25,8 @@ package integration
 
 import (
 	"testing"
-	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
@@ -33,8 +35,6 @@ import (
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/ident"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestAdminSessionFetchBlocksFromPeers(t *testing.T) {
@@ -89,7 +89,7 @@ func testAdminSessionFetchBlocksFromPeers(t *testing.T, setTestOpts setTestOptio
 		start := input.Start
 		testSetup.SetNowFn(start)
 		testData := generate.Block(input)
-		seriesMaps[xtime.ToUnixNano(start)] = testData
+		seriesMaps[start] = testData
 		require.NoError(t, testSetup.WriteBatch(testNamespaces[0], testData))
 	}
 	log.Debug("test data is now written")
@@ -110,8 +110,8 @@ func testSetupMetadatas(
 	t *testing.T,
 	testSetup TestSetup,
 	namespace ident.ID,
-	start time.Time,
-	end time.Time,
+	start xtime.UnixNano,
+	end xtime.UnixNano,
 ) map[uint32][]block.ReplicaMetadata {
 	// Retrieve written data using the AdminSession APIs
 	// FetchMetadataBlocksFromPeers/FetchBlocksFromPeers
@@ -183,7 +183,7 @@ func verifySeriesMapsEqual(
 				for idx := range es.Data {
 					expectedData := es.Data[idx]
 					observedData := os.Data[idx]
-					require.Equal(t, expectedData.Timestamp, observedData.Timestamp,
+					require.Equal(t, expectedData.TimestampNanos, observedData.TimestampNanos,
 						"data mismatch for series - [time: %v, seriesID: %v, idx: %v]",
 						i.ToTime().String(), es.ID.String(), idx)
 					require.Equal(t, expectedData.Value, observedData.Value,
@@ -221,8 +221,8 @@ func testSetupToSeriesMaps(
 		require.NotNil(t, blocksIter)
 
 		for blocksIter.Next() {
-			_, id, blk := blocksIter.Current()
-			ctx := context.NewContext()
+			_, id, tags, blk := blocksIter.Current()
+			ctx := context.NewBackground()
 			reader, err := blk.Stream(ctx)
 			require.NoError(t, err)
 			readerIter := iterPool.Get()
@@ -239,13 +239,14 @@ func testSetupToSeriesMaps(
 			readerIter.Close()
 			ctx.Close()
 
-			firstTs := datapoints[0].Timestamp
-			seriesMapList := seriesMap[xtime.ToUnixNano(firstTs.Truncate(blockSize))]
+			firstTS := datapoints[0].TimestampNanos
+			seriesMapList := seriesMap[firstTS.Truncate(blockSize)]
 			seriesMapList = append(seriesMapList, generate.Series{
 				ID:   id,
+				Tags: tags,
 				Data: datapoints,
 			})
-			seriesMap[xtime.ToUnixNano(firstTs.Truncate(blockSize))] = seriesMapList
+			seriesMap[firstTS.Truncate(blockSize)] = seriesMapList
 		}
 		require.NoError(t, blocksIter.Err())
 	}

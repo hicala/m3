@@ -28,15 +28,16 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/dbnode/digest"
 	"github.com/m3db/m3/src/dbnode/persist"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
 	"github.com/m3db/m3/src/x/checked"
 	"github.com/m3db/m3/src/x/ident"
 	"github.com/m3db/m3/src/x/pool"
-
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 var (
@@ -79,7 +80,7 @@ func newOpenWriter(t *testing.T) testWriter {
 	require.NoError(t, err)
 
 	blockSize := 2 * time.Hour
-	start := time.Now().Truncate(blockSize).Add(-2 * blockSize)
+	start := xtime.Now().Truncate(blockSize).Add(-2 * blockSize)
 	fileSetID := fs.FileSetFileIdentifier{
 		FileSetContentType: persist.FileSetDataContentType,
 		Namespace:          ident.StringID("foo"),

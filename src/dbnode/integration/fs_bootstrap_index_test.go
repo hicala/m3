@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 // Copyright (c) 2018 Uber Technologies, Inc.
@@ -26,16 +27,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/dbnode/integration/generate"
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/retention"
 	"github.com/m3db/m3/src/dbnode/storage/index"
+	"github.com/m3db/m3/src/m3ninx/doc"
 	"github.com/m3db/m3/src/m3ninx/idx"
+	idxpersist "github.com/m3db/m3/src/m3ninx/persist"
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/ident"
-
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 func TestFilesystemBootstrapIndexWithIndexingEnabled(t *testing.T) {
@@ -58,7 +62,7 @@ func TestFilesystemBootstrapIndexWithIndexingEnabledAndCheckTickFreeMmap(t *test
 					idx, err := ns.Index()
 					require.NoError(t, err)
 
-					result, err := idx.Tick(cancellable, time.Now())
+					result, err := idx.Tick(cancellable, xtime.Now())
 					require.NoError(t, err)
 
 					numSegmentsBootstrapped += result.NumSegmentsBootstrapped
@@ -118,15 +122,34 @@ func testFilesystemBootstrapIndexWithIndexingEnabled(
 		ID:   ident.StringID("foo"),
 		Tags: ident.NewTags(ident.StringTag("city", "new_york"), ident.StringTag("foo", "foo")),
 	}
+	fooDoc := doc.Metadata{
+		ID: fooSeries.ID.Bytes(),
+		Fields: []doc.Field{
+			{Name: []byte("city"), Value: []byte("new_york")},
+			{Name: []byte("foo"), Value: []byte("foo")},
+		},
+	}
 
 	barSeries := generate.Series{
 		ID:   ident.StringID("bar"),
 		Tags: ident.NewTags(ident.StringTag("city", "new_jersey")),
 	}
+	barDoc := doc.Metadata{
+		ID: barSeries.ID.Bytes(),
+		Fields: []doc.Field{
+			{Name: []byte("city"), Value: []byte("new_jersey")},
+		},
+	}
 
 	bazSeries := generate.Series{
 		ID:   ident.StringID("baz"),
 		Tags: ident.NewTags(ident.StringTag("city", "seattle")),
+	}
+	bazDoc := doc.Metadata{
+		ID: bazSeries.ID.Bytes(),
+		Fields: []doc.Field{
+			{Name: []byte("city"), Value: []byte("seattle")},
+		},
 	}
 
 	seriesMaps := generate.BlocksByStart([]generate.BlockConfig{
@@ -156,8 +179,22 @@ func testFilesystemBootstrapIndexWithIndexingEnabled(
 		},
 	})
 
+	defaultIndexDocs := []doc.Metadata{
+		fooDoc,
+		barDoc,
+		bazDoc,
+	}
+
 	require.NoError(t, writeTestDataToDisk(ns1, setup, seriesMaps, 0))
 	require.NoError(t, writeTestDataToDisk(ns2, setup, nil, 0))
+	require.NoError(t, writeTestIndexDataToDisk(
+		ns1,
+		setup.StorageOpts(),
+		idxpersist.DefaultIndexVolumeType,
+		now.Add(-blockSize),
+		setup.ShardSet().AllIDs(),
+		defaultIndexDocs,
+	))
 
 	// Start the server with filesystem bootstrapper
 	log := setup.StorageOpts().InstrumentOptions().Logger()
@@ -167,7 +204,8 @@ func testFilesystemBootstrapIndexWithIndexingEnabled(
 
 	// Stop the server
 	defer func() {
-		require.NoError(t, setup.StopServer())
+		require.NoError(t, setup.StopServerAndVerifyOpenFilesAreClosed())
+		setup.Close()
 		log.Debug("server is now down")
 	}()
 
@@ -186,8 +224,8 @@ func testFilesystemBootstrapIndexWithIndexingEnabled(
 	// Match all new_*r*
 	regexpQuery, err := idx.NewRegexpQuery([]byte("city"), []byte("new_.*r.*"))
 	require.NoError(t, err)
-	iter, fetchResponse, err := session.FetchTaggedIDs(ns1.ID(),
-		index.Query{Query: regexpQuery}, queryOpts)
+	iter, fetchResponse, err := session.FetchTaggedIDs(ContextWithDefaultTimeout(),
+		ns1.ID(), index.Query{Query: regexpQuery}, queryOpts)
 	require.NoError(t, err)
 	defer iter.Finalize()
 
@@ -200,8 +238,8 @@ func testFilesystemBootstrapIndexWithIndexingEnabled(
 	// Match all *e*e*
 	regexpQuery, err = idx.NewRegexpQuery([]byte("city"), []byte(".*e.*e.*"))
 	require.NoError(t, err)
-	iter, fetchResponse, err = session.FetchTaggedIDs(ns1.ID(),
-		index.Query{Query: regexpQuery}, queryOpts)
+	iter, fetchResponse, err = session.FetchTaggedIDs(ContextWithDefaultTimeout(),
+		ns1.ID(), index.Query{Query: regexpQuery}, queryOpts)
 	require.NoError(t, err)
 	defer iter.Finalize()
 

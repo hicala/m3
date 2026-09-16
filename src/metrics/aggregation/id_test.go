@@ -24,12 +24,12 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/m3db/m3/src/metrics/generated/proto/aggregationpb"
-	"github.com/m3db/m3/src/x/test/testmarshal"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v2"
 
-	"github.com/stretchr/testify/require"
+	"github.com/m3db/m3/src/metrics/generated/proto/aggregationpb"
+	"github.com/m3db/m3/src/x/test/testmarshal"
 )
 
 var (
@@ -39,13 +39,13 @@ var (
 
 func TestIDToProto(t *testing.T) {
 	var pb aggregationpb.AggregationID
-	require.NoError(t, testID.ToProto(&pb))
+	testID.ToProto(&pb)
 	require.Equal(t, testIDProto, pb)
 }
 
 func TestIDFromProto(t *testing.T) {
 	var res ID
-	require.NoError(t, res.FromProto(testIDProto))
+	res.FromProto(testIDProto)
 	require.Equal(t, testID, res)
 }
 
@@ -54,8 +54,8 @@ func TestIDRoundTrip(t *testing.T) {
 		pb  aggregationpb.AggregationID
 		res ID
 	)
-	require.NoError(t, testID.ToProto(&pb))
-	require.NoError(t, res.FromProto(pb))
+	testID.ToProto(&pb)
+	res.FromProto(pb)
 	require.Equal(t, testID, res)
 }
 

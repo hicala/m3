@@ -1,4 +1,6 @@
+//go:build big
 // +build big
+
 //
 // Copyright (c) 2018 Uber Technologies, Inc.
 //
@@ -26,11 +28,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/dbnode/ts"
 	"github.com/m3db/m3/src/x/context"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/stretchr/testify/require"
 )
 
 // TestCommitLogActiveLogsConcurrency makes sure that the
@@ -60,7 +62,7 @@ func TestCommitLogActiveLogsConcurrency(t *testing.T) {
 			default:
 				time.Sleep(time.Millisecond)
 				err := commitLog.Write(
-					context.NewContext(),
+					context.NewBackground(),
 					testSeries(t, opts, 0, "foo.bar", testTags1, 127),
 					ts.Datapoint{},
 					xtime.Second,
@@ -151,7 +153,7 @@ func TestCommitLogRotateLogsConcurrency(t *testing.T) {
 			default:
 				time.Sleep(time.Millisecond)
 				err := commitLog.Write(
-					context.NewContext(),
+					context.NewBackground(),
 					testSeries(t, opts, 0, "foo.bar", testTags1, 127),
 					ts.Datapoint{},
 					xtime.Second,

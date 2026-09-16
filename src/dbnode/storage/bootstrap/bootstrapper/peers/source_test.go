@@ -26,6 +26,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
 	m3dbruntime "github.com/m3db/m3/src/dbnode/runtime"
@@ -36,9 +39,6 @@ import (
 	"github.com/m3db/m3/src/x/context"
 	"github.com/m3db/m3/src/x/instrument"
 	xtime "github.com/m3db/m3/src/x/time"
-
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -54,7 +54,7 @@ func TestPeersSourceAvailableDataAndIndex(t *testing.T) {
 		blockSize                  = 2 * time.Hour
 		nsMetadata                 = testNamespaceMetadata(t)
 		numShards                  = uint32(4)
-		blockStart                 = time.Now().Truncate(blockSize)
+		blockStart                 = xtime.Now().Truncate(blockSize)
 		shardTimeRangesToBootstrap = result.NewShardTimeRanges()
 		bootstrapRanges            = xtime.NewRanges(xtime.Range{
 			Start: blockStart,
@@ -200,7 +200,7 @@ func TestPeersSourceReturnsErrorIfUnknownPersistenceFileSetType(t *testing.T) {
 		opts     = newTestDefaultOpts(t, ctrl)
 		ropts    = testNsMd.Options().RetentionOptions()
 
-		start = time.Now().Add(-ropts.RetentionPeriod()).Truncate(ropts.BlockSize())
+		start = xtime.Now().Add(-ropts.RetentionPeriod()).Truncate(ropts.BlockSize())
 		end   = start.Add(2 * ropts.BlockSize())
 	)
 
@@ -219,7 +219,7 @@ func TestPeersSourceReturnsErrorIfUnknownPersistenceFileSetType(t *testing.T) {
 	tester := bootstrap.BuildNamespacesTesterWithFilesystemOptions(t, runOpts, target, opts.FilesystemOptions(), testNsMd)
 	defer tester.Finish()
 
-	ctx := context.NewContext()
+	ctx := context.NewBackground()
 	defer ctx.Close()
 
 	_, err = src.Read(ctx, tester.Namespaces, tester.Cache)

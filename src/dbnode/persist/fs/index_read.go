@@ -26,15 +26,15 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/m3db/m3/src/dbnode/digest"
 	"github.com/m3db/m3/src/dbnode/generated/proto/index"
 	"github.com/m3db/m3/src/dbnode/persist"
 	idxpersist "github.com/m3db/m3/src/m3ninx/persist"
 	"github.com/m3db/m3/src/x/mmap"
-
-	"go.uber.org/zap"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 const (
@@ -48,7 +48,7 @@ type indexReader struct {
 	logger         *zap.Logger
 
 	namespaceDir string
-	start        time.Time
+	start        xtime.UnixNano
 	fileSetType  persist.FileSetType
 	volumeIndex  int
 
@@ -121,9 +121,9 @@ func (r *indexReader) Open(
 	default:
 		return result, fmt.Errorf("cannot open index reader for fileset type: %s", opts.FileSetType)
 	}
-	checkpointFilepath = filesetPathFromTimeAndIndex(r.namespaceDir, r.start, r.volumeIndex, checkpointFileSuffix)
-	infoFilepath = filesetPathFromTimeAndIndex(r.namespaceDir, r.start, r.volumeIndex, infoFileSuffix)
-	digestFilepath = filesetPathFromTimeAndIndex(r.namespaceDir, r.start, r.volumeIndex, digestFileSuffix)
+	checkpointFilepath = FilesetPathFromTimeAndIndex(r.namespaceDir, r.start, r.volumeIndex, CheckpointFileSuffix)
+	infoFilepath = FilesetPathFromTimeAndIndex(r.namespaceDir, r.start, r.volumeIndex, InfoFileSuffix)
+	digestFilepath = FilesetPathFromTimeAndIndex(r.namespaceDir, r.start, r.volumeIndex, DigestFileSuffix)
 
 	// If there is no checkpoint file, don't read the index files.
 	if err := r.readCheckpointFile(checkpointFilepath); err != nil {
@@ -235,7 +235,7 @@ func (r *indexReader) ReadSegmentFileSet() (
 			desc mmap.Descriptor
 		)
 		mmapResult, err := mmap.Files(os.Open, map[string]mmap.FileDesc{
-			filePath: mmap.FileDesc{
+			filePath: {
 				File:       &fd,
 				Descriptor: &desc,
 				Options: mmap.Options{

@@ -25,7 +25,7 @@ import (
 	"errors"
 	"sync"
 
-	xclose "github.com/m3db/m3/src/x/close"
+	xresource "github.com/m3db/m3/src/x/resource"
 )
 
 var errClosed = errors.New("closed")
@@ -34,7 +34,7 @@ type closer func()
 
 // Updatable can be updated.
 type Updatable interface {
-	xclose.SimpleCloser
+	xresource.SimpleCloser
 
 	// C returns the notification channel for updates.
 	C() <-chan struct{}
@@ -50,7 +50,7 @@ type Watch interface {
 
 // Watchable can be watched
 type Watchable interface {
-	xclose.SimpleCloser
+	xresource.SimpleCloser
 
 	// IsClosed returns true if the Watchable is closed
 	IsClosed() bool
@@ -67,6 +67,11 @@ type Watchable interface {
 // NewWatchable returns a Watchable
 func NewWatchable() Watchable {
 	return &watchable{}
+}
+
+// NewPrefixWatchable returns a PrefixWatchable
+func NewPrefixWatchable() Watchable {
+	return &prefixWatchable{values: make(map[string]interface{})}
 }
 
 type watchable struct {
@@ -179,6 +184,68 @@ func (w *watchable) closeFunc(c chan struct{}) closer {
 			}
 		}
 	}
+}
+
+type prefixWatchable struct {
+	watchable
+	values map[string]interface{}
+}
+
+func (w *prefixWatchable) Update(v interface{}) error {
+	w.Lock()
+	defer w.Unlock()
+
+	if w.closed {
+		return errClosed
+	}
+
+	// add v into the values map.
+	vMap, ok := v.(map[string]interface{})
+	if !ok {
+		return errors.New("invalid value for prefix watch")
+	}
+	w.values = vMap
+
+	for _, s := range w.active {
+		select {
+		case s <- struct{}{}:
+		default:
+		}
+	}
+
+	return nil
+}
+
+func (w *prefixWatchable) Get() interface{} {
+	w.RLock()
+	v := w.values
+	w.RUnlock()
+	return v
+}
+
+func (w *prefixWatchable) Watch() (interface{}, Watch, error) {
+	w.Lock()
+
+	if w.closed {
+		w.Unlock()
+		return nil, nil, errClosed
+	}
+
+	c := make(chan struct{}, 1)
+	notify := (len(w.values) > 0)
+	w.active = append(w.active, c)
+	w.Unlock()
+
+	if notify {
+		select {
+		case c <- struct{}{}:
+		default:
+		}
+	}
+
+	closeFn := w.closeFunc(c)
+	watch := &watch{o: w, c: c, closeFn: closeFn}
+	return w.Get(), watch, nil
 }
 
 type watch struct {

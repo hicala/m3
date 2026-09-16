@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/cmd/services/m3comparator/main/parser"
 	"github.com/m3db/m3/src/dbnode/encoding"
 	"github.com/m3db/m3/src/dbnode/encoding/m3tsz"
@@ -33,12 +35,10 @@ import (
 	"github.com/m3db/m3/src/query/remote"
 	"github.com/m3db/m3/src/x/instrument"
 	"github.com/m3db/m3/src/x/pool"
-
-	"go.uber.org/zap"
 )
 
 var (
-	iterPools = pools.BuildIteratorPools(
+	iterPools = pools.BuildIteratorPools(encoding.NewOptions(),
 		pools.BuildIteratorPoolsOptions{})
 	poolWrapper = pools.NewPoolsWrapper(iterPools)
 
@@ -62,10 +62,13 @@ func init() {
 	checkedBytesPool = pool.NewCheckedBytesPool(buckets, nil, newBackingBytesPool)
 	checkedBytesPool.Init()
 
-	encodingOpts = encoding.NewOptions().SetEncoderPool(encoderPool).SetBytesPool(checkedBytesPool)
+	encodingOpts = encoding.NewOptions().
+		SetEncoderPool(encoderPool).
+		SetBytesPool(checkedBytesPool).
+		SetMetrics(encoding.NewMetrics(iOpts.MetricsScope()))
 
 	encoderPool.Init(func() encoding.Encoder {
-		return m3tsz.NewEncoder(time.Time{}, nil, true, encodingOpts)
+		return m3tsz.NewEncoder(0, nil, true, encodingOpts)
 	})
 }
 

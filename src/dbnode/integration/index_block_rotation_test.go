@@ -1,4 +1,6 @@
+//go:build integration
 // +build integration
+
 //
 // Copyright (c) 2016 Uber Technologies, Inc.
 //
@@ -26,14 +28,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/retention"
 	"github.com/m3db/m3/src/dbnode/storage/index"
 	"github.com/m3db/m3/src/m3ninx/idx"
 	xclock "github.com/m3db/m3/src/x/clock"
-
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 /*
@@ -79,7 +82,7 @@ func TestIndexBlockRotation(t *testing.T) {
 	require.NoError(t, err)
 	defer testSetup.Close()
 
-	t0 := time.Date(2018, time.May, 6, 13, 0, 0, 0, time.UTC)
+	t0 := xtime.ToUnixNano(time.Date(2018, time.May, 6, 13, 0, 0, 0, time.UTC))
 	t1 := t0.Add(20 * time.Minute)
 	t2 := t1.Add(3 * time.Hour)
 	testSetup.SetNowFn(t0)
@@ -93,7 +96,7 @@ func TestIndexBlockRotation(t *testing.T) {
 	// Stop the server
 	defer func() {
 		require.NoError(t, testSetup.StopServer())
-		log.Debug("server is now down")
+		log.Info("server is now down")
 	}()
 
 	client := testSetup.M3DBClient()
@@ -111,15 +114,16 @@ func TestIndexBlockRotation(t *testing.T) {
 		return indexPeriod0 == len(writesPeriod0)
 	}, 5*time.Second)
 	require.True(t, indexed)
-	log.Info("verifiied data is indexed", zap.Duration("took", time.Since(start)))
+	log.Info("verified data is indexed", zap.Duration("took", time.Since(start)))
 
 	// "shared":"shared", is a common tag across all written metrics
 	query := index.Query{
-		Query: idx.NewTermQuery([]byte("shared"), []byte("shared"))}
+		Query: idx.NewTermQuery([]byte("shared"), []byte("shared")),
+	}
 
 	// ensure all data is present
 	log.Info("querying period0 results")
-	period0Results, _, err := session.FetchTagged(
+	period0Results, _, err := session.FetchTagged(ContextWithDefaultTimeout(),
 		md.ID(), query, index.QueryOptions{StartInclusive: t0, EndExclusive: t1})
 	require.NoError(t, err)
 	writesPeriod0.MatchesSeriesIters(t, period0Results)
@@ -128,13 +132,24 @@ func TestIndexBlockRotation(t *testing.T) {
 	// move time to 4p
 	testSetup.SetNowFn(t2)
 
-	// give tick some time to evict the block
-	testSetup.SleepFor10xTickMinimumInterval()
-
 	// ensure all data is absent
 	log.Info("querying period0 results after expiry")
-	period0Results, _, err = session.FetchTagged(
-		md.ID(), query, index.QueryOptions{StartInclusive: t0, EndExclusive: t1})
-	require.NoError(t, err)
-	require.Equal(t, 0, period0Results.Len())
+	// await for results to be empty.
+	// in practice we've seen it take 11s, so make it 30s to be safe.
+	time.Sleep(time.Second * 4)
+	timeout := time.Second * 30
+	noData := xclock.WaitUntil(func() bool {
+		period0Results, _, err = session.FetchTagged(ContextWithDefaultTimeout(),
+			md.ID(), query, index.QueryOptions{StartInclusive: t0, EndExclusive: t1})
+		require.NoError(t, err)
+		require.True(t, period0Results.Len() == 50, "results still indexed")
+
+		for _, i := range period0Results.Iters() {
+			if i.Next() {
+				return false
+			}
+		}
+		return true
+	}, timeout)
+	require.True(t, noData, "data still present after %s", timeout)
 }
